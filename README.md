@@ -2,7 +2,9 @@
 
 **PO**sitronic **S3** — Make using S3 as simple as using local files.
 
-`pos3` provides a Pythonic context manager for syncing directories and files with S3. It is designed for data processing pipelines and machine learning workflows where you want to work with local files but persist data in S3.
+`pos3` provides a Pythonic context manager for syncing directories and files with S3. It is designed for data processing pipelines and machine learning workflows where you need to integrate S3 with code that **only understands local files**.
+
+> The main value of `pos3` is enabling you to pass S3 data to **third-party libraries or legacy scripts** that expect local file paths (e.g., `opencv`, `pandas.read_csv`, or model training scripts). Instead of rewriting their I/O logic to support S3, `pos3` transparently bridges the gap.
 
 ## Core Concepts
 
@@ -122,7 +124,7 @@ Why use `pos3` instead of other Python libraries?
 | **Lifecycle** | **Automated** (Open/Close) | Manual | Manual |
 | **Background Upload** | **Yes** (Non-blocking) | Manual Threading | No (Blocking) |
 | **Local I/O Speed** | **Native** (SSD) | Native | Network Bound (Virtual FS) |
-| **Use Case** | **ML / Pipelines** | App Development | DataFrames / Interactive |
+| **Use Case** | **ML / Pipelines / 3rd Party Code** | App Development | DataFrames / Interactive |
 
 - **vs `boto3`**: `boto3` is the raw AWS SDK. `pos3` wraps it to provide "mirroring" logic, threading, and diffing out of the box.
 - **vs `s3fs`**: `s3fs` treats S3 as a filesystem. `pos3` treats S3 as a persistence layer for your high-speed local storage, ensuring you always get native IO performance.
