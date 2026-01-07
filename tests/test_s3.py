@@ -305,9 +305,7 @@ class TestDownloadSync:
         with tempfile.TemporaryDirectory() as tmpdir:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 s3.download("s3://bucket/data", delete=True)
-                with pytest.raises(
-                    ValueError, match="already registered with different parameters"
-                ):
+                with pytest.raises(ValueError, match="already registered with different parameters"):
                     s3.download("s3://bucket/data", delete=False)
 
     @patch(BOTO3_PATCH_TARGET)
@@ -832,12 +830,8 @@ class TestExclude:
 
             # Should not download remote.log or upload local.log
             # Only file.txt should be considered (and it's already synced)
-            assert (
-                mock_s3.download_file.call_count == 0
-            )  # file.txt already exists with same size
-            assert (
-                mock_s3.upload_file.call_count == 0
-            )  # file.txt already synced, *.log excluded
+            assert mock_s3.download_file.call_count == 0  # file.txt already exists with same size
+            assert mock_s3.upload_file.call_count == 0  # file.txt already synced, *.log excluded
 
     @patch(BOTO3_PATCH_TARGET)
     def test_download_exclude_parameter_conflict(self, mock_boto_client):
@@ -848,9 +842,7 @@ class TestExclude:
         with tempfile.TemporaryDirectory() as tmpdir:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 s3.download("s3://bucket/data", exclude=["*.log"])
-                with pytest.raises(
-                    ValueError, match="already registered with different parameters"
-                ):
+                with pytest.raises(ValueError, match="already registered with different parameters"):
                     s3.download("s3://bucket/data", exclude=["*.txt"])
 
     @patch(BOTO3_PATCH_TARGET)
@@ -871,11 +863,226 @@ class TestExclude:
             local_dir = Path(tmpdir) / "data"
 
             with s3.mirror(cache_root=tmpdir, show_progress=False):
-                s3.download(
-                    "s3://bucket/data", local=local_dir, exclude=["*.log", "*.tmp"]
-                )
+                s3.download("s3://bucket/data", local=local_dir, exclude=["*.log", "*.tmp"])
 
             # Should only download file.txt
             assert mock_s3.download_file.call_count == 1
             call_args = mock_s3.download_file.call_args_list[0][0]
             assert "file.txt" in call_args[1]
+
+
+class TestProfile:
+    def setup_method(self):
+        """Clear registered profiles before each test."""
+        s3._PROFILES.clear()
+
+    def test_register_profile_success(self):
+        """Test that register_profile stores the profile correctly."""
+        s3.register_profile(
+            "test-profile",
+            endpoint="https://storage.example.com",
+            public=True,
+            region="us-west-2",
+        )
+
+        assert "test-profile" in s3._PROFILES
+        profile = s3._PROFILES["test-profile"]
+        assert profile.endpoint == "https://storage.example.com"
+        assert profile.public is True
+        assert profile.region == "us-west-2"
+
+    def test_register_profile_duplicate_same_config(self):
+        """Test that registering same profile with identical config is no-op."""
+        s3.register_profile("test-profile", endpoint="https://storage.example.com", public=True)
+        # Should not raise
+        s3.register_profile("test-profile", endpoint="https://storage.example.com", public=True)
+
+        assert "test-profile" in s3._PROFILES
+
+    def test_register_profile_duplicate_different_config(self):
+        """Test that registering same profile with different config raises error."""
+        s3.register_profile("test-profile", endpoint="https://storage.example.com", public=True)
+
+        with pytest.raises(ValueError, match="already registered with different config"):
+            s3.register_profile("test-profile", endpoint="https://other.example.com", public=True)
+
+    def test_profile_local_name_underscore_reserved(self):
+        """Test that local_name='_' is reserved and raises error."""
+        from pos3 import Profile
+
+        with pytest.raises(ValueError, match="reserved for default"):
+            Profile(local_name="_", endpoint="https://storage.example.com")
+
+    def test_profile_local_name_invalid_chars_rejected(self):
+        """Test that local_name with invalid characters is rejected."""
+        from pos3 import Profile
+
+        invalid_names = ["../escape", "/absolute", "sub/dir", "with space", "with.dot", ""]
+        for name in invalid_names:
+            with pytest.raises(ValueError, match="Invalid local_name"):
+                Profile(local_name=name, endpoint="https://storage.example.com")
+
+        # Valid names should work
+        Profile(local_name="valid-name", endpoint="https://storage.example.com")
+        Profile(local_name="valid_name", endpoint="https://storage.example.com")
+        Profile(local_name="ValidName123", endpoint="https://storage.example.com")
+
+    def test_create_client_unknown_profile(self):
+        """Test that using unknown profile raises error."""
+        with pytest.raises(ValueError, match="Unknown profile"):
+            s3._resolve_profile("nonexistent-profile")
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_create_client_with_public_profile(self, mock_boto_client):
+        """Test that public profile creates client with UNSIGNED signature."""
+        from botocore import UNSIGNED
+
+        from pos3 import Profile
+
+        profile = Profile(local_name="test", endpoint="https://storage.example.com", public=True)
+        s3._create_s3_client(profile)
+
+        mock_boto_client.assert_called_once()
+        call_kwargs = mock_boto_client.call_args[1]
+        assert call_kwargs["endpoint_url"] == "https://storage.example.com"
+        assert call_kwargs["config"].signature_version == UNSIGNED
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_create_client_with_profile_object(self, mock_boto_client):
+        """Test that inline Profile object works without registration."""
+        from pos3 import Profile
+
+        profile = Profile(local_name="inline", endpoint="https://storage.example.com", public=False, region="eu-west-1")
+        s3._create_s3_client(profile)
+
+        mock_boto_client.assert_called_once()
+        call_kwargs = mock_boto_client.call_args[1]
+        assert call_kwargs["endpoint_url"] == "https://storage.example.com"
+        assert call_kwargs["region_name"] == "eu-west-1"
+        assert "config" not in call_kwargs  # Not public, no UNSIGNED
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_with_profile(self, mock_boto_client):
+        """Test that download with profile uses correct S3 client."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("test-profile", endpoint="https://storage.example.com", public=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/data", profile="test-profile")
+
+        # Client should have been created with profile settings
+        assert mock_boto_client.call_count >= 1
+        # Find the call with our endpoint
+        found_profile_call = False
+        for call in mock_boto_client.call_args_list:
+            if call[1].get("endpoint_url") == "https://storage.example.com":
+                found_profile_call = True
+                break
+        assert found_profile_call, "Expected client to be created with profile endpoint"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_mirror_default_profile(self, mock_boto_client):
+        """Test that default_profile on mirror() is used when no profile specified."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("default-test", endpoint="https://default.example.com", public=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False, default_profile="default-test"):
+                s3.download("s3://bucket/data")
+
+        # Client should have been created with default profile settings
+        found_default_call = False
+        for call in mock_boto_client.call_args_list:
+            if call[1].get("endpoint_url") == "https://default.example.com":
+                found_default_call = True
+                break
+        assert found_default_call, "Expected client to be created with default profile endpoint"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_profile_override_default(self, mock_boto_client):
+        """Test that explicit profile parameter overrides default_profile."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("default-test", endpoint="https://default.example.com")
+        s3.register_profile("override-test", endpoint="https://override.example.com")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False, default_profile="default-test"):
+                s3.download("s3://bucket/data", profile="override-test")
+
+        # Client should have been created with override profile, not default
+        found_override_call = False
+        for call in mock_boto_client.call_args_list:
+            if call[1].get("endpoint_url") == "https://override.example.com":
+                found_override_call = True
+                break
+        assert found_override_call, "Expected client to be created with override profile endpoint"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_implicit_and_explicit_default_profile_no_conflict(self, mock_boto_client):
+        """Test that implicit None and explicit default profile don't conflict."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("my-profile", endpoint="https://storage.example.com")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False, default_profile="my-profile"):
+                # First call with implicit profile (None -> uses default)
+                path1 = s3.download("s3://bucket/data")
+                # Second call with explicit default profile - should NOT conflict
+                path2 = s3.download("s3://bucket/data", profile="my-profile")
+
+                assert path1 == path2
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_same_url_different_profiles_no_conflict(self, mock_boto_client):
+        """Test that same S3 URL with different profiles doesn't conflict."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("profile-a", endpoint="https://a.example.com")
+        s3.register_profile("profile-b", endpoint="https://b.example.com")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                # Same S3 URL but different profiles - should NOT conflict
+                path_a = s3.download("s3://bucket/data", profile="profile-a")
+                path_b = s3.download("s3://bucket/data", profile="profile-b")
+
+                # Different cache paths due to different local_names
+                assert path_a != path_b
+                assert "profile-a" in str(path_a)
+                assert "profile-b" in str(path_b)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_with_mirror_resolves_profile_at_call_time(self, mock_boto_client):
+        """Test that with_mirror resolves profile when function is called, not at decoration."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        # Define decorated function BEFORE registering profile
+        @s3.with_mirror(show_progress=False, default_profile="late-profile")
+        def do_download():
+            return s3.download("s3://bucket/data")
+
+        # Register profile AFTER decoration
+        s3.register_profile("late-profile", endpoint="https://late.example.com")
+
+        # Should work - profile resolved at call time
+        with tempfile.TemporaryDirectory():
+            do_download()
+
+        # Verify the late-registered profile was used
+        found_late_call = False
+        for call in mock_boto_client.call_args_list:
+            if call[1].get("endpoint_url") == "https://late.example.com":
+                found_late_call = True
+                break
+        assert found_late_call, "Expected profile to be resolved at call time"
