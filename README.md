@@ -128,3 +128,46 @@ Why use `pos3` instead of other Python libraries?
 
 - **vs `boto3`**: `boto3` is the raw AWS SDK. `pos3` wraps it to provide "mirroring" logic, threading, and diffing out of the box.
 - **vs `s3fs`**: `s3fs` treats S3 as a filesystem. `pos3` treats S3 as a persistence layer for your high-speed local storage, ensuring you always get native IO performance.
+
+## Advanced Features
+
+### Profiles
+
+Profiles enable accessing multiple S3-compatible endpoints simultaneously within the same context. This is useful when your workflow combines data from different sources:
+
+```python
+import pos3
+from pos3 import Profile
+
+# Register profiles for different endpoints
+pos3.register_profile('nebius-public',
+    endpoint='https://storage.eu-north1.nebius.cloud',
+    public=True  # anonymous access, no credentials needed
+)
+pos3.register_profile('minio-local',
+    endpoint='http://localhost:9000',
+    region='us-east-1'
+)
+
+# Use multiple profiles in the same context
+with pos3.mirror():
+    # Download public dataset from Nebius
+    dataset = pos3.download('s3://public-data/dataset/', profile='nebius-public')
+
+    # Download private config from local MinIO
+    config = pos3.download('s3://private/config/', profile='minio-local')
+
+    # Upload results to AWS (default boto3 credentials)
+    results = pos3.upload('s3://my-aws-bucket/results/')
+
+    train(dataset, config, results)
+
+# You can also use inline Profile objects without registration
+custom = Profile(endpoint='https://custom.example.com', public=True)
+with pos3.mirror():
+    data = pos3.download('s3://bucket/path', profile=custom)
+
+# Or set a default profile for the entire context
+with pos3.mirror(default_profile='nebius-public'):
+    data = pos3.download('s3://bucket/path')  # uses nebius-public
+```

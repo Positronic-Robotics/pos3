@@ -17,10 +17,84 @@ from typing import Any
 from urllib.parse import urlparse
 
 import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Profile:
+    """Configuration for an S3-compatible endpoint."""
+
+    endpoint: str
+    public: bool = False
+    region: str | None = None
+
+
+_PROFILES: dict[str, Profile] = {}
+
+
+def register_profile(
+    name: str,
+    endpoint: str,
+    public: bool = False,
+    region: str | None = None,
+) -> None:
+    """Register a named profile for S3 access.
+
+    Args:
+        name: Profile name (e.g., 'positronic-public')
+        endpoint: S3 endpoint URL (e.g., 'https://storage.eu-north1.nebius.cloud')
+        public: If True, use anonymous access (no credentials)
+        region: Optional region name
+    """
+    config = Profile(endpoint=endpoint, public=public, region=region)
+    existing = _PROFILES.get(name)
+    if existing is not None and existing != config:
+        raise ValueError(f"Profile '{name}' already registered with different config")
+    _PROFILES[name] = config
+
+
+def _resolve_profile(profile: str | Profile | None) -> Profile | None:
+    """Resolve a profile name to a Profile object.
+
+    Args:
+        profile: None, registered profile name (string), or Profile object.
+
+    Returns:
+        Profile object or None.
+
+    Raises:
+        ValueError: If profile is a string that is not registered.
+    """
+    if profile is None or isinstance(profile, Profile):
+        return profile
+    if profile not in _PROFILES:
+        raise ValueError(f"Unknown profile: '{profile}'. Register with pos3.register_profile() first.")
+    return _PROFILES[profile]
+
+
+def _create_s3_client(profile: Profile | None = None):
+    """Create boto3 S3 client, optionally using a profile.
+
+    Args:
+        profile: None (use boto3 defaults) or Profile config.
+    """
+    if profile is None:
+        return boto3.client("s3")
+
+    kwargs: dict[str, Any] = {"endpoint_url": profile.endpoint}
+
+    if profile.region:
+        kwargs["region_name"] = profile.region
+
+    if profile.public:
+        kwargs["config"] = Config(signature_version=UNSIGNED)
+
+    return boto3.client("s3", **kwargs)
 
 
 class _NullTqdm(nullcontext):
@@ -153,6 +227,7 @@ class _Options:
     cache_root: str = "~/.cache/positronic/s3/"
     show_progress: bool = True
     max_workers: int = 10
+    default_profile: Profile | None = None
 
     def cache_path_for(self, remote: str) -> Path:
         bucket, key = _parse_s3_url(remote)
@@ -166,6 +241,7 @@ class _DownloadRegistration:
     local_path: Path
     delete: bool
     exclude: list[str] | None
+    profile: Profile | None = None
     ready: threading.Event = field(default_factory=threading.Event)
     error: Exception | None = None
 
@@ -177,6 +253,7 @@ class _DownloadRegistration:
             and self.local_path == other.local_path
             and self.delete == other.delete
             and self.exclude == other.exclude
+            and self.profile == other.profile
         )
 
 
@@ -188,6 +265,7 @@ class _UploadRegistration:
     delete: bool
     sync_on_error: bool
     exclude: list[str] | None
+    profile: Profile | None = None
     last_sync: float = 0.0
 
     def __eq__(self, other):
@@ -200,6 +278,7 @@ class _UploadRegistration:
             and self.delete == other.delete
             and self.sync_on_error == other.sync_on_error
             and self.exclude == other.exclude
+            and self.profile == other.profile
         )
 
 
@@ -214,7 +293,8 @@ class _Mirror:
         self.cache_root = Path(self.options.cache_root).expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
-        self.s3_client = boto3.client("s3")
+        self._default_profile = options.default_profile
+        self._clients: dict[Profile | None, Any] = {}
 
         self._downloads: dict[str, _DownloadRegistration] = {}
         self._uploads: dict[str, _UploadRegistration] = {}
@@ -222,6 +302,13 @@ class _Mirror:
 
         self._stop_event: threading.Event | None = None
         self._sync_thread: threading.Thread | None = None
+
+    def _get_client(self, profile: Profile | None = None) -> Any:
+        """Get or create S3 client for the given profile."""
+        effective_profile = profile if profile is not None else self._default_profile
+        if effective_profile not in self._clients:
+            self._clients[effective_profile] = _create_s3_client(effective_profile)
+        return self._clients[effective_profile]
 
     @property
     def running(self) -> bool:
@@ -247,6 +334,7 @@ class _Mirror:
         local: str | Path | None,
         delete: bool,
         exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
     ) -> Path:
         """
         Register (and perform if needed) a download from a remote S3 bucket path to a local directory or file.
@@ -257,6 +345,7 @@ class _Mirror:
             local (str | Path | None): Local directory or file destination. If None, uses cache path from options.
             delete (bool): If True, deletes local files not present in S3.
             exclude (list[str] | None): List of glob patterns to exclude from download.
+            profile: S3 profile name or Profile config for custom endpoints.
 
         Returns:
             Path: The canonical local path associated with this download registration.
@@ -265,6 +354,8 @@ class _Mirror:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
         """
+        resolved_profile = _resolve_profile(profile)
+
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
             return path
@@ -272,7 +363,7 @@ class _Mirror:
         normalized = _normalize_s3_url(remote)
         local_path = self.options.cache_path_for(remote) if local is None else Path(local).expanduser().resolve()
         new_registration = _DownloadRegistration(
-            remote=normalized, local_path=local_path, delete=delete, exclude=exclude
+            remote=normalized, local_path=local_path, delete=delete, exclude=exclude, profile=resolved_profile
         )
 
         with self._lock:
@@ -290,7 +381,7 @@ class _Mirror:
 
         if need_download:
             try:
-                self._perform_download(normalized, local_path, delete, exclude)
+                self._perform_download(normalized, local_path, delete, exclude, resolved_profile)
             except Exception as exc:
                 registration.error = exc
                 registration.ready.set()
@@ -314,6 +405,7 @@ class _Mirror:
         delete,
         sync_on_error,
         exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
     ) -> Path:
         """
         Register (and perform if needed) an upload from a local directory or file to a remote S3 bucket path.
@@ -325,6 +417,7 @@ class _Mirror:
             delete (bool): If True, deletes remote files not present locally.
             sync_on_error (bool): If True, attempts to sync files even when encountering errors.
             exclude (list[str] | None): List of glob patterns to exclude from upload.
+            profile: S3 profile name or Profile config for custom endpoints.
 
         Returns:
             Path: The canonical local path associated with this upload registration.
@@ -332,6 +425,8 @@ class _Mirror:
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
         """
+        resolved_profile = _resolve_profile(profile)
+
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
             path.mkdir(parents=True, exist_ok=True)
@@ -347,6 +442,7 @@ class _Mirror:
             delete=delete,
             sync_on_error=sync_on_error,
             exclude=exclude,
+            profile=resolved_profile,
             last_sync=0,
         )
 
@@ -373,18 +469,23 @@ class _Mirror:
         delete_remote: bool,
         sync_on_error: bool,
         exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
     ) -> Path:
-        local_path = self.download(remote, local, delete_local, exclude)
+        resolved_profile = _resolve_profile(profile)
+
+        local_path = self.download(remote, local, delete_local, exclude, resolved_profile)
         if not _is_s3_path(remote):
             return local_path
 
         normalized = _normalize_s3_url(remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop(normalized, None)
-        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude)
+        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, resolved_profile)
 
-    def ls(self, prefix: str, recursive: bool = False) -> list[str]:
+    def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
+        resolved_profile = _resolve_profile(profile)
+
         if _is_s3_path(prefix):
             normalized = _normalize_s3_url(prefix)
             bucket, key = _parse_s3_url(normalized)
@@ -392,7 +493,7 @@ class _Mirror:
             if key:
                 key = key + "/"
             items = []
-            for info in self._scan_s3(bucket, key):
+            for info in self._scan_s3(bucket, key, resolved_profile):
                 if info.relative_path:
                     # Skip nested items if not recursive
                     if not recursive and "/" in info.relative_path:
@@ -459,7 +560,7 @@ class _Mirror:
         self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
-        tasks: list[tuple[str, Path, bool, list[str] | None]] = []
+        tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []
         for registration in registrations:
             if registration.local_path.exists():
                 tasks.append(
@@ -468,32 +569,33 @@ class _Mirror:
                         registration.local_path,
                         registration.delete,
                         registration.exclude,
+                        registration.profile,
                     )
                 )
 
         if not tasks:
             return
 
-        to_put: list[tuple[FileInfo, Path, str, str]] = []
-        to_remove: list[tuple[str, str]] = []
+        to_put: list[tuple[FileInfo, Path, str, str, Profile | None]] = []
+        to_remove: list[tuple[str, str, Profile | None]] = []
         total_bytes = 0
 
-        for remote, local_path, delete, exclude in tasks:
+        for remote, local_path, delete, exclude, profile in tasks:
             logger.debug("Syncing upload: %s from %s (delete=%s)", remote, local_path, delete)
             bucket, prefix = _parse_s3_url(remote)
             to_copy, to_delete = _compute_sync_diff(
                 _filter_fileinfo(_scan_local(local_path), exclude),
-                _filter_fileinfo(self._scan_s3(bucket, prefix), exclude),
+                _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
             )
 
             for info in to_copy:
                 s3_key = prefix + ("/" + info.relative_path if info.relative_path else "")
-                to_put.append((info, local_path, bucket, s3_key))
+                to_put.append((info, local_path, bucket, s3_key, profile))
                 total_bytes += info.size
 
             for info in to_delete if delete else []:
                 s3_key = prefix + ("/" + info.relative_path if info.relative_path else "")
-                to_remove.append((bucket, s3_key))
+                to_remove.append((bucket, s3_key, profile))
 
         if to_put:
             with (
@@ -501,15 +603,18 @@ class _Mirror:
                 ThreadPoolExecutor(max_workers=self.options.max_workers) as executor,
             ):
                 futures = [
-                    executor.submit(self._put_to_s3, info, local_path, bucket, key, pbar)
-                    for info, local_path, bucket, key in to_put
+                    executor.submit(self._put_to_s3, info, local_path, bucket, key, pbar, profile)
+                    for info, local_path, bucket, key, profile in to_put
                 ]
                 _process_futures(as_completed(futures), "Upload")
 
         if to_remove:
             to_remove_sorted = sorted(to_remove, key=lambda x: x[1].count("/"), reverse=True)
             with ThreadPoolExecutor(max_workers=self.options.max_workers) as executor:
-                futures = [executor.submit(self._remove_from_s3, bucket, key) for bucket, key in to_remove_sorted]
+                futures = [
+                    executor.submit(self._remove_from_s3, bucket, key, profile)
+                    for bucket, key, profile in to_remove_sorted
+                ]
                 iterator = as_completed(futures)
                 if self.options.show_progress:
                     iterator = tqdm(
@@ -519,7 +624,14 @@ class _Mirror:
                     )
                 _process_futures(iterator, "Delete")
 
-    def _perform_download(self, remote: str, local_path: Path, delete: bool, exclude: list[str] | None) -> None:
+    def _perform_download(
+        self,
+        remote: str,
+        local_path: Path,
+        delete: bool,
+        exclude: list[str] | None,
+        profile: Profile | None = None,
+    ) -> None:
         bucket, prefix = _parse_s3_url(remote)
         logger.debug(
             "Performing download: s3://%s/%s to %s (delete=%s)",
@@ -529,7 +641,7 @@ class _Mirror:
             delete,
         )
         to_copy, to_delete = _compute_sync_diff(
-            _filter_fileinfo(self._scan_s3(bucket, prefix), exclude),
+            _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
             _filter_fileinfo(_scan_local(local_path), exclude),
         )
 
@@ -554,7 +666,7 @@ class _Mirror:
                 self._progress_bar(total_bytes, f"Downloading {remote}") as pbar,
                 ThreadPoolExecutor(max_workers=self.options.max_workers) as executor,
             ):
-                futures = [executor.submit(self._put_locally, *args, pbar) for args in to_put]
+                futures = [executor.submit(self._put_locally, *args, pbar, profile) for args in to_put]
                 _process_futures(as_completed(futures), "Download")
 
         if to_remove:
@@ -565,13 +677,14 @@ class _Mirror:
             for path in iterator:
                 self._remove_locally(path)
 
-    def _list_s3_objects(self, bucket: str, key: str) -> Iterator[dict]:
+    def _list_s3_objects(self, bucket: str, key: str, profile: Profile | None = None) -> Iterator[dict]:
         logger.debug("Listing S3 objects: bucket=%s, key=%s", bucket, key)
+        client = self._get_client(profile)
         # Skip head_object for directory-like keys ending with '/'
         # as we want to list contents, not check if the directory marker exists
         if not key.endswith("/"):
             try:
-                obj = self.s3_client.head_object(Bucket=bucket, Key=key)
+                obj = client.head_object(Bucket=bucket, Key=key)
             except ClientError as exc:
                 error_code = exc.response["Error"]["Code"]
                 if error_code != "404":
@@ -583,18 +696,18 @@ class _Mirror:
                 yield {**obj, "Key": key}
                 return
 
-        paginator = self.s3_client.get_paginator("list_objects_v2")
+        paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=key):
             objects = page.get("Contents", [])
             logger.debug("Listed %d objects with prefix %s", len(objects), key)
             yield from objects
 
-    def _scan_s3(self, bucket: str, prefix: str) -> Iterator[FileInfo]:
+    def _scan_s3(self, bucket: str, prefix: str, profile: Profile | None = None) -> Iterator[FileInfo]:
         logger.debug("Scanning S3: s3://%s/%s", bucket, prefix)
         seen_dirs: set[str] = set()
         has_content = False
 
-        for obj in self._list_s3_objects(bucket, prefix):
+        for obj in self._list_s3_objects(bucket, prefix, profile):
             has_content = True
             key = obj["Key"]
             relative = key[len(prefix) :].lstrip("/")
@@ -625,33 +738,40 @@ class _Mirror:
             return _NullTqdm()
         return tqdm(total=total_bytes, unit="B", unit_scale=True, unit_divisor=1024, desc=desc)
 
-    def _put_to_s3(self, info: FileInfo, local_path: Path, bucket: str, key: str, pbar) -> None:
+    def _put_to_s3(
+        self, info: FileInfo, local_path: Path, bucket: str, key: str, pbar, profile: Profile | None = None
+    ) -> None:
         try:
+            client = self._get_client(profile)
             if info.is_dir:
                 key += "/" if not key.endswith("/") else ""
-                self.s3_client.put_object(Bucket=bucket, Key=key, Body=b"")
+                client.put_object(Bucket=bucket, Key=key, Body=b"")
             else:
                 file_path = local_path / info.relative_path if info.relative_path else local_path
-                self.s3_client.upload_file(str(file_path), bucket, key, Callback=pbar.update)
+                client.upload_file(str(file_path), bucket, key, Callback=pbar.update)
         except Exception as exc:
             logger.error("Failed to put %s to %s/%s: %s", local_path, bucket, key, exc)
             raise
 
-    def _remove_from_s3(self, bucket: str, key: str) -> None:
+    def _remove_from_s3(self, bucket: str, key: str, profile: Profile | None = None) -> None:
         try:
-            self.s3_client.delete_object(Bucket=bucket, Key=key)
+            client = self._get_client(profile)
+            client.delete_object(Bucket=bucket, Key=key)
         except Exception as exc:
             logger.error("Failed to remove %s/%s: %s", bucket, key, exc)
             raise
 
-    def _put_locally(self, info: FileInfo, bucket: str, key: str, local_path: Path, pbar) -> None:
+    def _put_locally(
+        self, info: FileInfo, bucket: str, key: str, local_path: Path, pbar, profile: Profile | None = None
+    ) -> None:
         try:
             target = local_path / info.relative_path if info.relative_path else local_path
             if info.is_dir:
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                self.s3_client.download_file(bucket, key, str(target), Callback=pbar.update)
+                client = self._get_client(profile)
+                client.download_file(bucket, key, str(target), Callback=pbar.update)
         except Exception as exc:
             logger.error("Failed to put %s locally: %s", key, exc)
             raise
@@ -672,6 +792,7 @@ def mirror(
     cache_root: str = "~/.cache/positronic/s3/",
     show_progress: bool = True,
     max_workers: int = 10,
+    default_profile: str | Profile | None = None,
 ):
     """
     Context manager that activates the sync environment.
@@ -680,9 +801,16 @@ def mirror(
         cache_root: Base directory for caching downloaded files.
         show_progress: Display tqdm progress bars.
         max_workers: Threads for parallel S3 operations.
+        default_profile: Default S3 profile for all operations in this context.
     """
     global _GLOBAL_ACTIVE_MIRROR
-    options = _Options(cache_root=cache_root, show_progress=show_progress, max_workers=max_workers)
+    resolved_default_profile = _resolve_profile(default_profile)
+    options = _Options(
+        cache_root=cache_root,
+        show_progress=show_progress,
+        max_workers=max_workers,
+        default_profile=resolved_default_profile,
+    )
 
     with _GLOBAL_MIRROR_LOCK:
         if _GLOBAL_ACTIVE_MIRROR is not None:
@@ -712,11 +840,14 @@ def with_mirror(
     cache_root: str = "~/.cache/positronic/s3/",
     show_progress: bool = True,
     max_workers: int = 10,
+    default_profile: str | Profile | None = None,
 ):
     """
     Decorator equivalent of mirror() for wrapping functions.
     See mirror() for argument details.
     """
+    # Resolve profile at decoration time
+    resolved_default_profile = _resolve_profile(default_profile)
 
     def decorator(func):
         @wraps(func)
@@ -725,6 +856,7 @@ def with_mirror(
                 cache_root=cache_root,
                 show_progress=show_progress,
                 max_workers=max_workers,
+                default_profile=resolved_default_profile,
             ):
                 return func(*args, **kwargs)
 
@@ -750,6 +882,7 @@ def download(
     local: str | Path | None = None,
     delete: bool = True,
     exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
 ) -> Path:
     """
     Register a path for download. Ensures local copy matches S3 immediately.
@@ -759,12 +892,13 @@ def download(
         local: Explicit local destination. Defaults to standard cache path.
         delete: If True (default), deletes local files NOT in S3 ("mirror" behavior).
         exclude: List of glob patterns to skip.
+        profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.download(remote, local, delete, exclude)
+    return mirror_obj.download(remote, local, delete, exclude, profile)
 
 
 def upload(
@@ -774,6 +908,7 @@ def upload(
     delete: bool = True,
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
 ) -> Path:
     """
     Register a local path for upload. Uploads on exit and optionally in background.
@@ -784,12 +919,13 @@ def upload(
         interval: Seconds between background syncs. None for exit-only.
         delete: If True (default), deletes S3 files NOT present locally.
         sync_on_error: If True, syncs even if the context exits with an exception.
+        profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude)
+    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude, profile)
 
 
 def sync(
@@ -800,6 +936,7 @@ def sync(
     delete_remote: bool = True,
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
 ) -> Path:
     """
     Bi-directional helper. Performs download() then registers upload().
@@ -807,27 +944,29 @@ def sync(
     Args:
         delete_local: Cleanup local files during download.
         delete_remote: Cleanup remote files during upload.
+        profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude)
+    return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile)
 
 
-def ls(prefix: str, recursive: bool = False) -> list[str]:
+def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
     """
     Lists files/objects in a directory or S3 prefix.
 
     Args:
         prefix: S3 URL or local path.
         recursive: List subdirectories if True.
+        profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
         List of full S3 URLs or local paths.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.ls(prefix, recursive)
+    return mirror_obj.ls(prefix, recursive, profile)
 
 
-__all__ = ["mirror", "download", "upload", "sync", "ls", "_parse_s3_url"]
+__all__ = ["mirror", "with_mirror", "download", "upload", "sync", "ls", "register_profile", "Profile", "_parse_s3_url"]
