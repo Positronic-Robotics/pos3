@@ -44,6 +44,8 @@ class Profile:
     def __post_init__(self):
         if self.local_name == "_":
             raise ValueError("Profile local_name cannot be '_' (reserved for default)")
+        if not self.local_name or not all(c.isalnum() or c in "-_" for c in self.local_name):
+            raise ValueError(f"Invalid local_name '{self.local_name}': use only alphanumeric, dash, underscore")
 
 
 _PROFILES: dict[str, Profile] = {}

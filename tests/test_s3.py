@@ -913,6 +913,20 @@ class TestProfile:
         with pytest.raises(ValueError, match="reserved for default"):
             Profile(local_name="_", endpoint="https://storage.example.com")
 
+    def test_profile_local_name_invalid_chars_rejected(self):
+        """Test that local_name with invalid characters is rejected."""
+        from pos3 import Profile
+
+        invalid_names = ["../escape", "/absolute", "sub/dir", "with space", "with.dot", ""]
+        for name in invalid_names:
+            with pytest.raises(ValueError, match="Invalid local_name"):
+                Profile(local_name=name, endpoint="https://storage.example.com")
+
+        # Valid names should work
+        Profile(local_name="valid-name", endpoint="https://storage.example.com")
+        Profile(local_name="valid_name", endpoint="https://storage.example.com")
+        Profile(local_name="ValidName123", endpoint="https://storage.example.com")
+
     def test_create_client_unknown_profile(self):
         """Test that using unknown profile raises error."""
         with pytest.raises(ValueError, match="Unknown profile"):
