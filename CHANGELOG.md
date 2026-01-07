@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0] - 2026-01-07
+
+### Added
+- Profile system for S3-compatible endpoints (MinIO, Nebius, etc.) ([#4](https://github.com/Positronic-Robotics/pos3/pull/4))
+- `pos3.Profile` dataclass for endpoint configuration
+- `pos3.register_profile()` for named profile registration
+- `profile` parameter on `download()`, `upload()`, `sync()`, `ls()`
+- `default_profile` parameter on `mirror()` and `with_mirror()`
+- Support for anonymous/public bucket access via `public=True`
+- Multiple profiles can be used simultaneously in the same context
+- Cache path isolation per profile via `local_name`
+
 ## [0.1.0] - 2025-12-10
 
 ### Added
