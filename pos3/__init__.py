@@ -27,11 +27,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Profile:
-    """Configuration for an S3-compatible endpoint."""
+    """Configuration for an S3-compatible endpoint.
 
+    Attributes:
+        local_name: Identifier used in cache path (e.g., 'nebius'). Cannot be '_' (reserved).
+        endpoint: S3 endpoint URL (e.g., 'https://storage.eu-north1.nebius.cloud').
+        public: If True, use anonymous access (no credentials required).
+        region: Optional AWS region name.
+    """
+
+    local_name: str
     endpoint: str
     public: bool = False
     region: str | None = None
+
+    def __post_init__(self):
+        if self.local_name == "_":
+            raise ValueError("Profile local_name cannot be '_' (reserved for default)")
 
 
 _PROFILES: dict[str, Profile] = {}
@@ -42,16 +54,14 @@ def register_profile(
     endpoint: str,
     public: bool = False,
     region: str | None = None,
+    local_name: str | None = None,
 ) -> None:
     """Register a named profile for S3 access.
 
-    Args:
-        name: Profile name (e.g., 'positronic-public')
-        endpoint: S3 endpoint URL (e.g., 'https://storage.eu-north1.nebius.cloud')
-        public: If True, use anonymous access (no credentials)
-        region: Optional region name
+    Creates a Profile with the given parameters. See Profile class for field details.
+    The `local_name` defaults to the profile `name` if not specified.
     """
-    config = Profile(endpoint=endpoint, public=public, region=region)
+    config = Profile(local_name=local_name or name, endpoint=endpoint, public=public, region=region)
     existing = _PROFILES.get(name)
     if existing is not None and existing != config:
         raise ValueError(f"Profile '{name}' already registered with different config")
@@ -229,10 +239,11 @@ class _Options:
     max_workers: int = 10
     default_profile: Profile | None = None
 
-    def cache_path_for(self, remote: str) -> Path:
+    def cache_path_for(self, remote: str, profile: Profile | None = None) -> Path:
         bucket, key = _parse_s3_url(remote)
         cache_root = Path(self.cache_root).expanduser().resolve()
-        return cache_root / bucket / key
+        local_name = profile.local_name if profile else "_"
+        return cache_root / local_name / bucket / key
 
 
 @dataclass
@@ -366,7 +377,11 @@ class _Mirror:
             return path
 
         normalized = _normalize_s3_url(remote)
-        local_path = self.options.cache_path_for(remote) if local is None else Path(local).expanduser().resolve()
+        local_path = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
         new_registration = _DownloadRegistration(
             remote=normalized, local_path=local_path, delete=delete, exclude=exclude, profile=effective_profile
         )
@@ -438,7 +453,11 @@ class _Mirror:
             return path
 
         normalized = _normalize_s3_url(remote)
-        local_path = self.options.cache_path_for(remote) if local is None else Path(local).expanduser().resolve()
+        local_path = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
 
         new_registration = _UploadRegistration(
             remote=normalized,

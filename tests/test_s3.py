@@ -906,6 +906,13 @@ class TestProfile:
         with pytest.raises(ValueError, match="already registered with different config"):
             s3.register_profile("test-profile", endpoint="https://other.example.com", public=True)
 
+    def test_profile_local_name_underscore_reserved(self):
+        """Test that local_name='_' is reserved and raises error."""
+        from pos3 import Profile
+
+        with pytest.raises(ValueError, match="reserved for default"):
+            Profile(local_name="_", endpoint="https://storage.example.com")
+
     def test_create_client_unknown_profile(self):
         """Test that using unknown profile raises error."""
         with pytest.raises(ValueError, match="Unknown profile"):
@@ -918,7 +925,7 @@ class TestProfile:
 
         from pos3 import Profile
 
-        profile = Profile(endpoint="https://storage.example.com", public=True)
+        profile = Profile(local_name="test", endpoint="https://storage.example.com", public=True)
         s3._create_s3_client(profile)
 
         mock_boto_client.assert_called_once()
@@ -931,7 +938,7 @@ class TestProfile:
         """Test that inline Profile object works without registration."""
         from pos3 import Profile
 
-        profile = Profile(endpoint="https://storage.example.com", public=False, region="eu-west-1")
+        profile = Profile(local_name="inline", endpoint="https://storage.example.com", public=False, region="eu-west-1")
         s3._create_s3_client(profile)
 
         mock_boto_client.assert_called_once()

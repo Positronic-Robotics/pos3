@@ -163,7 +163,7 @@ with pos3.mirror():
     train(dataset, config, results)
 
 # You can also use inline Profile objects without registration
-custom = Profile(endpoint='https://custom.example.com', public=True)
+custom = Profile(local_name='custom', endpoint='https://custom.example.com', public=True)
 with pos3.mirror():
     data = pos3.download('s3://bucket/path', profile=custom)
 
@@ -171,3 +171,5 @@ with pos3.mirror():
 with pos3.mirror(default_profile='nebius-public'):
     data = pos3.download('s3://bucket/path')  # uses nebius-public
 ```
+
+Each profile has a `local_name` used in the cache path to keep files from different endpoints separate. When registering profiles, `local_name` defaults to the profile name. The default AWS profile uses `_` as its local name.
