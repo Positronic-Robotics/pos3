@@ -1028,6 +1028,26 @@ class TestProfile:
                 assert path1 == path2
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_same_url_different_profiles_no_conflict(self, mock_boto_client):
+        """Test that same S3 URL with different profiles doesn't conflict."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("profile-a", endpoint="https://a.example.com")
+        s3.register_profile("profile-b", endpoint="https://b.example.com")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                # Same S3 URL but different profiles - should NOT conflict
+                path_a = s3.download("s3://bucket/data", profile="profile-a")
+                path_b = s3.download("s3://bucket/data", profile="profile-b")
+
+                # Different cache paths due to different local_names
+                assert path_a != path_b
+                assert "profile-a" in str(path_a)
+                assert "profile-b" in str(path_b)
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_with_mirror_resolves_profile_at_call_time(self, mock_boto_client):
         """Test that with_mirror resolves profile when function is called, not at decoration."""
         paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]

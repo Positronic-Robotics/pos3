@@ -307,8 +307,8 @@ class _Mirror:
         self._default_profile = options.default_profile
         self._clients: dict[Profile | None, Any] = {}
 
-        self._downloads: dict[str, _DownloadRegistration] = {}
-        self._uploads: dict[str, _UploadRegistration] = {}
+        self._downloads: dict[tuple[str, Profile | None], _DownloadRegistration] = {}
+        self._uploads: dict[tuple[str, Profile | None], _UploadRegistration] = {}
         self._lock = threading.RLock()
 
         self._stop_event: threading.Event | None = None
@@ -387,15 +387,16 @@ class _Mirror:
         )
 
         with self._lock:
-            existing = self._downloads.get(normalized)
+            reg_key = (normalized, effective_profile)
+            existing = self._downloads.get(reg_key)
             if existing:
                 if existing != new_registration:
                     raise ValueError(f"Download for '{normalized}' already registered with different parameters")
                 registration = existing
                 need_download = False
             else:
-                self._check_download_conflicts(normalized)
-                self._downloads[normalized] = new_registration
+                self._check_download_conflicts(normalized, effective_profile)
+                self._downloads[reg_key] = new_registration
                 registration = new_registration
                 need_download = True
 
@@ -406,7 +407,7 @@ class _Mirror:
                 registration.error = exc
                 registration.ready.set()
                 with self._lock:
-                    self._downloads.pop(normalized, None)
+                    self._downloads.pop(reg_key, None)
                 raise
             else:
                 registration.ready.set()
@@ -471,14 +472,15 @@ class _Mirror:
         )
 
         with self._lock:
-            existing = self._uploads.get(normalized)
+            reg_key = (normalized, effective_profile)
+            existing = self._uploads.get(reg_key)
             if existing:
                 if existing != new_registration:
                     raise ValueError(f"Upload for '{normalized}' already registered with different parameters")
                 return existing.local_path
 
             self._check_upload_conflicts(new_registration)
-            self._uploads[normalized] = new_registration
+            self._uploads[reg_key] = new_registration
             if interval is not None:
                 self._ensure_background_thread_unlocked()
 
@@ -501,8 +503,9 @@ class _Mirror:
             return local_path
 
         normalized = _normalize_s3_url(remote)
+        effective_profile = self._effective_profile(profile)
         # Unregister the download to allow upload registration for the same remote
-        self._downloads.pop(normalized, None)
+        self._downloads.pop((normalized, effective_profile), None)
         return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile)
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
@@ -540,18 +543,19 @@ class _Mirror:
                     items.append(str(display_path.joinpath(Path(info.relative_path))))
             return items
 
-    def _check_download_conflicts(self, candidate: str) -> None:
-        for upload_remote in self._uploads:
-            if _s3_paths_conflict(candidate, upload_remote):
+    def _check_download_conflicts(self, candidate: str, profile: Profile | None) -> None:
+        for (upload_remote, upload_profile), _reg in self._uploads.items():
+            if upload_profile == profile and _s3_paths_conflict(candidate, upload_remote):
                 raise ValueError(f"Conflict: download '{candidate}' overlaps with upload '{upload_remote}'")
 
     def _check_upload_conflicts(self, new_registration) -> None:
         candidate = new_registration.remote
-        for download_remote in self._downloads:
-            if _s3_paths_conflict(candidate, download_remote):
+        candidate_profile = new_registration.profile
+        for (download_remote, download_profile), _reg in self._downloads.items():
+            if download_profile == candidate_profile and _s3_paths_conflict(candidate, download_remote):
                 raise ValueError(f"Conflict: upload '{candidate}' overlaps with download '{download_remote}'")
-        for upload_remote, reg in self._uploads.items():
-            if _s3_paths_conflict(candidate, upload_remote):
+        for (upload_remote, upload_profile), reg in self._uploads.items():
+            if upload_profile == candidate_profile and _s3_paths_conflict(candidate, upload_remote):
                 same_remote = candidate == upload_remote
                 if not same_remote or reg != new_registration:
                     raise ValueError(f"Conflict: upload '{candidate}' overlaps with upload '{upload_remote}'")
