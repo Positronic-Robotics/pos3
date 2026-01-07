@@ -303,6 +303,11 @@ class _Mirror:
         self._stop_event: threading.Event | None = None
         self._sync_thread: threading.Thread | None = None
 
+    def _effective_profile(self, profile: str | Profile | None) -> Profile | None:
+        """Resolve profile name and substitute default if None."""
+        resolved = _resolve_profile(profile)
+        return resolved if resolved is not None else self._default_profile
+
     def _get_client(self, profile: Profile | None = None) -> Any:
         """Get or create S3 client for the given profile."""
         effective_profile = profile if profile is not None else self._default_profile
@@ -354,7 +359,7 @@ class _Mirror:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
         """
-        resolved_profile = _resolve_profile(profile)
+        effective_profile = self._effective_profile(profile)
 
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
@@ -363,7 +368,7 @@ class _Mirror:
         normalized = _normalize_s3_url(remote)
         local_path = self.options.cache_path_for(remote) if local is None else Path(local).expanduser().resolve()
         new_registration = _DownloadRegistration(
-            remote=normalized, local_path=local_path, delete=delete, exclude=exclude, profile=resolved_profile
+            remote=normalized, local_path=local_path, delete=delete, exclude=exclude, profile=effective_profile
         )
 
         with self._lock:
@@ -381,7 +386,7 @@ class _Mirror:
 
         if need_download:
             try:
-                self._perform_download(normalized, local_path, delete, exclude, resolved_profile)
+                self._perform_download(normalized, local_path, delete, exclude, effective_profile)
             except Exception as exc:
                 registration.error = exc
                 registration.ready.set()
@@ -425,7 +430,7 @@ class _Mirror:
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
         """
-        resolved_profile = _resolve_profile(profile)
+        effective_profile = self._effective_profile(profile)
 
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
@@ -442,7 +447,7 @@ class _Mirror:
             delete=delete,
             sync_on_error=sync_on_error,
             exclude=exclude,
-            profile=resolved_profile,
+            profile=effective_profile,
             last_sync=0,
         )
 
@@ -471,20 +476,19 @@ class _Mirror:
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
     ) -> Path:
-        resolved_profile = _resolve_profile(profile)
-
-        local_path = self.download(remote, local, delete_local, exclude, resolved_profile)
+        # Let download() and upload() handle profile resolution and normalization
+        local_path = self.download(remote, local, delete_local, exclude, profile)
         if not _is_s3_path(remote):
             return local_path
 
         normalized = _normalize_s3_url(remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop(normalized, None)
-        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, resolved_profile)
+        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile)
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
-        resolved_profile = _resolve_profile(profile)
+        effective_profile = self._effective_profile(profile)
 
         if _is_s3_path(prefix):
             normalized = _normalize_s3_url(prefix)
@@ -493,7 +497,7 @@ class _Mirror:
             if key:
                 key = key + "/"
             items = []
-            for info in self._scan_s3(bucket, key, resolved_profile):
+            for info in self._scan_s3(bucket, key, effective_profile):
                 if info.relative_path:
                     # Skip nested items if not recursive
                     if not recursive and "/" in info.relative_path:
@@ -846,17 +850,16 @@ def with_mirror(
     Decorator equivalent of mirror() for wrapping functions.
     See mirror() for argument details.
     """
-    # Resolve profile at decoration time
-    resolved_default_profile = _resolve_profile(default_profile)
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # Resolve profile at call time, not decoration time
             with mirror(
                 cache_root=cache_root,
                 show_progress=show_progress,
                 max_workers=max_workers,
-                default_profile=resolved_default_profile,
+                default_profile=default_profile,
             ):
                 return func(*args, **kwargs)
 

@@ -1002,3 +1002,46 @@ class TestProfile:
                 found_override_call = True
                 break
         assert found_override_call, "Expected client to be created with override profile endpoint"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_implicit_and_explicit_default_profile_no_conflict(self, mock_boto_client):
+        """Test that implicit None and explicit default profile don't conflict."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        s3.register_profile("my-profile", endpoint="https://storage.example.com")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False, default_profile="my-profile"):
+                # First call with implicit profile (None -> uses default)
+                path1 = s3.download("s3://bucket/data")
+                # Second call with explicit default profile - should NOT conflict
+                path2 = s3.download("s3://bucket/data", profile="my-profile")
+
+                assert path1 == path2
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_with_mirror_resolves_profile_at_call_time(self, mock_boto_client):
+        """Test that with_mirror resolves profile when function is called, not at decoration."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        # Define decorated function BEFORE registering profile
+        @s3.with_mirror(show_progress=False, default_profile="late-profile")
+        def do_download():
+            return s3.download("s3://bucket/data")
+
+        # Register profile AFTER decoration
+        s3.register_profile("late-profile", endpoint="https://late.example.com")
+
+        # Should work - profile resolved at call time
+        with tempfile.TemporaryDirectory():
+            do_download()
+
+        # Verify the late-registered profile was used
+        found_late_call = False
+        for call in mock_boto_client.call_args_list:
+            if call[1].get("endpoint_url") == "https://late.example.com":
+                found_late_call = True
+                break
+        assert found_late_call, "Expected profile to be resolved at call time"
