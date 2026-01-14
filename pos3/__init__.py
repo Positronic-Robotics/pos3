@@ -709,26 +709,35 @@ class _Mirror:
     def _list_s3_objects(self, bucket: str, key: str, profile: Profile | None = None) -> Iterator[dict]:
         logger.debug("Listing S3 objects: bucket=%s, key=%s", bucket, key)
         client = self._get_client(profile)
-        # Skip head_object for directory-like keys ending with '/'
-        # as we want to list contents, not check if the directory marker exists
-        if not key.endswith("/"):
+
+        # Determine the listing prefix - ensure it ends with "/" for directory-like operations
+        # This prevents "droid/recovery" from matching "droid/recovery_towels"
+        list_prefix = key
+
+        # If key doesn't end with "/", try to fetch it as a single object first
+        if key and not key.endswith("/"):
             try:
                 obj = client.head_object(Bucket=bucket, Key=key)
             except ClientError as exc:
                 error_code = exc.response["Error"]["Code"]
                 if error_code != "404":
                     raise
+                # Not a single file - treat as directory by adding "/"
+                list_prefix = key + "/"
             else:
+                # Found single object
                 logger.debug("Found single object via head_object: %s", key)
                 if "ContentLength" in obj and "Size" not in obj:
                     obj["Size"] = obj["ContentLength"]
                 yield {**obj, "Key": key}
                 return
+        # If key already ends with "/", skip head_object - it's clearly a directory prefix
 
+        # List with the directory prefix (guaranteed to end with "/")
         paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=key):
+        for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
             objects = page.get("Contents", [])
-            logger.debug("Listed %d objects with prefix %s", len(objects), key)
+            logger.debug("Listed %d objects with prefix %s", len(objects), list_prefix)
             yield from objects
 
     def _scan_s3(self, bucket: str, prefix: str, profile: Profile | None = None) -> Iterator[FileInfo]:
