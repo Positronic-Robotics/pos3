@@ -939,6 +939,47 @@ class TestPrefixBoundaryMatching:
                 # Should NOT have called paginate
                 assert mock_s3.get_paginator.call_count == 0
 
+    @patch(BOTO3_PATCH_TARGET)
+    def test_directory_without_trailing_slash_gets_slash_added(self, mock_boto_client):
+        """Test that downloading a directory without trailing slash still works correctly.
+
+        User scenario: download('s3://bucket/my_dir') where my_dir is a directory.
+        The fix should:
+        1. Try head_object('my_dir') first
+        2. Get 404 (not a single file)
+        3. Add trailing slash and list with Prefix='my_dir/'
+        4. Only match 'my_dir/*', NOT 'my_dir_backup/*'
+        """
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        # Mock paginator to return directory contents
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "my_dir/file1.txt", "Size": 100}, {"Key": "my_dir/file2.txt", "Size": 200}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                mirror_obj = s3._require_active_mirror()
+
+                # User downloads directory without trailing slash (after normalization: key="my_dir")
+                results = list(mirror_obj._list_s3_objects("bucket", "my_dir", None))
+
+                # Should have tried head_object first
+                assert mock_s3.head_object.call_count == 1
+                head_call_key = mock_s3.head_object.call_args[1]["Key"]
+                assert head_call_key == "my_dir"
+
+                # After getting 404, should have listed with trailing slash
+                paginate_calls = mock_paginator.paginate.call_args_list
+                assert len(paginate_calls) == 1
+                prefix_used = paginate_calls[0][1]["Prefix"]
+                assert prefix_used == "my_dir/", f"Expected 'my_dir/' but got '{prefix_used}'"
+
+                # Should have returned the directory contents
+                assert len(results) == 2
+
 
 class TestProfile:
     def setup_method(self):
