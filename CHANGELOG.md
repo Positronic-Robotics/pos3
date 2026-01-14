@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-01-14
+
+### Fixed
+- Fixed S3 prefix matching bug where paths like `s3://bucket/data/` would incorrectly match adjacent paths like `s3://bucket/data_backup/`. The `_list_s3_objects()` function now ensures directory prefixes always end with `/` to prevent spurious matches at path boundaries.
+
 ## [0.2.0] - 2026-01-07
 
 ### Added

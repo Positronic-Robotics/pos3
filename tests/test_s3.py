@@ -871,6 +871,116 @@ class TestExclude:
             assert "file.txt" in call_args[1]
 
 
+class TestPrefixBoundaryMatching:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_prefix_boundary_prevents_spurious_matches(self, mock_boto_client):
+        """Test that S3 prefix matching respects path boundaries.
+
+        When downloading s3://bucket/data/, should NOT match s3://bucket/data_backup/
+        This is a regression test for the bug where "droid/recovery" matched "droid/recovery_towels"
+        """
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                mirror_obj = s3._require_active_mirror()
+
+                # Simulate listing objects - should add "/" to prefix when key doesn't end with "/"
+                _ = list(mirror_obj._list_s3_objects("bucket", "data", None))
+
+                # Verify that paginate was called with "data/" (with trailing slash)
+                paginator_calls = mock_s3.get_paginator.return_value.paginate.call_args_list
+                assert len(paginator_calls) == 1
+                call_kwargs = paginator_calls[0][1]
+                assert (
+                    call_kwargs["Prefix"] == "data/"
+                ), f"Expected Prefix='data/' but got Prefix='{call_kwargs['Prefix']}'"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_prefix_boundary_with_trailing_slash(self, mock_boto_client):
+        """Test that keys already ending with '/' don't get double slashes."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                mirror_obj = s3._require_active_mirror()
+
+                # List with trailing slash already present
+                _ = list(mirror_obj._list_s3_objects("bucket", "data/", None))
+
+                # Should use "data/" as-is, not "data//"
+                paginator_calls = mock_s3.get_paginator.return_value.paginate.call_args_list
+                assert len(paginator_calls) == 1
+                call_kwargs = paginator_calls[0][1]
+                assert call_kwargs["Prefix"] == "data/"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_single_file_download_bypasses_list(self, mock_boto_client):
+        """Test that single file downloads use head_object and don't list with prefix."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+
+        # Mock head_object to return a valid file
+        mock_s3.head_object.return_value = {"ContentLength": 1234, "ETag": "abc123"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                mirror_obj = s3._require_active_mirror()
+
+                # List a single file (no trailing slash)
+                results = list(mirror_obj._list_s3_objects("bucket", "data/file.txt", None))
+
+                # Should have called head_object and returned the file
+                assert mock_s3.head_object.call_count == 1
+                assert len(results) == 1
+                assert results[0]["Key"] == "data/file.txt"
+                assert results[0]["Size"] == 1234
+
+                # Should NOT have called paginate
+                assert mock_s3.get_paginator.call_count == 0
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_directory_without_trailing_slash_gets_slash_added(self, mock_boto_client):
+        """Test that downloading a directory without trailing slash still works correctly.
+
+        User scenario: download('s3://bucket/my_dir') where my_dir is a directory.
+        The fix should:
+        1. Try head_object('my_dir') first
+        2. Get 404 (not a single file)
+        3. Add trailing slash and list with Prefix='my_dir/'
+        4. Only match 'my_dir/*', NOT 'my_dir_backup/*'
+        """
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        # Mock paginator to return directory contents
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "my_dir/file1.txt", "Size": 100}, {"Key": "my_dir/file2.txt", "Size": 200}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                mirror_obj = s3._require_active_mirror()
+
+                # User downloads directory without trailing slash (after normalization: key="my_dir")
+                results = list(mirror_obj._list_s3_objects("bucket", "my_dir", None))
+
+                # Should have tried head_object first
+                assert mock_s3.head_object.call_count == 1
+                head_call_key = mock_s3.head_object.call_args[1]["Key"]
+                assert head_call_key == "my_dir"
+
+                # After getting 404, should have listed with trailing slash
+                paginate_calls = mock_paginator.paginate.call_args_list
+                assert len(paginate_calls) == 1
+                prefix_used = paginate_calls[0][1]["Prefix"]
+                assert prefix_used == "my_dir/", f"Expected 'my_dir/' but got '{prefix_used}'"
+
+                # Should have returned the directory contents
+                assert len(results) == 2
+
+
 class TestProfile:
     def setup_method(self):
         """Clear registered profiles before each test."""
