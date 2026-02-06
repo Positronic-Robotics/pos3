@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.2] - 2026-02-06
+
+### Fixed
+- Fixed S3 key construction for directory markers being inconsistent across code paths. Consolidated all key building into a single `_make_s3_key(prefix, info)` helper, ensuring trailing `/` is always appended for directories. Previously, the upload-copies path relied on a separate fixup in `_put_to_s3`, while the delete path had its own inline fix — a pattern that caused the v0.2.1 bug.
+
 ## [0.2.1] - 2026-01-14
 
 ### Fixed

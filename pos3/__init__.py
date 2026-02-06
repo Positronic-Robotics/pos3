@@ -142,6 +142,17 @@ def _s3_paths_conflict(left: str, right: str) -> bool:
     return left_norm.startswith(right_norm + "/") or right_norm.startswith(left_norm + "/")
 
 
+def _make_s3_key(prefix: str, info: FileInfo) -> str:
+    """Build the canonical S3 key from a prefix and FileInfo, including trailing '/' for directories."""
+    if info.relative_path:
+        key = prefix + "/" + info.relative_path if prefix else info.relative_path
+    else:
+        key = prefix
+    if info.is_dir and not key.endswith("/"):
+        key += "/"
+    return key
+
+
 def _process_futures(futures, operation: str) -> None:
     for future in futures:
         try:
@@ -618,12 +629,12 @@ class _Mirror:
             )
 
             for info in to_copy:
-                s3_key = prefix + ("/" + info.relative_path if info.relative_path else "")
+                s3_key = _make_s3_key(prefix, info)
                 to_put.append((info, local_path, bucket, s3_key, profile))
                 total_bytes += info.size
 
             for info in to_delete if delete else []:
-                s3_key = prefix + ("/" + info.relative_path if info.relative_path else "")
+                s3_key = _make_s3_key(prefix, info)
                 to_remove.append((bucket, s3_key, profile))
 
         if to_put:
@@ -679,7 +690,7 @@ class _Mirror:
         total_bytes = 0
 
         for info in to_copy:
-            s3_key = prefix + ("/" + info.relative_path if info.relative_path else "")
+            s3_key = _make_s3_key(prefix, info)
             to_put.append((info, bucket, s3_key, local_path))
             total_bytes += info.size
 
@@ -782,7 +793,6 @@ class _Mirror:
         try:
             client = self._get_client(profile)
             if info.is_dir:
-                key += "/" if not key.endswith("/") else ""
                 client.put_object(Bucket=bucket, Key=key, Body=b"")
             else:
                 file_path = local_path / info.relative_path if info.relative_path else local_path

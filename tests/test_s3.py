@@ -29,6 +29,43 @@ def _setup_s3_mock(mock_boto_client, paginate_return_value=None):
     return mock_s3
 
 
+class TestMakeS3Key:
+    def test_file_with_prefix(self):
+        info = s3.FileInfo(relative_path="file.txt", size=100, is_dir=False)
+        assert s3._make_s3_key("data", info) == "data/file.txt"
+
+    def test_dir_with_prefix(self):
+        info = s3.FileInfo(relative_path="subdir", size=0, is_dir=True)
+        assert s3._make_s3_key("data", info) == "data/subdir/"
+
+    def test_root_dir(self):
+        info = s3.FileInfo(relative_path="", size=0, is_dir=True)
+        assert s3._make_s3_key("data", info) == "data/"
+
+    def test_empty_prefix_file(self):
+        info = s3.FileInfo(relative_path="file.txt", size=100, is_dir=False)
+        assert s3._make_s3_key("", info) == "file.txt"
+
+    def test_empty_prefix_dir(self):
+        info = s3.FileInfo(relative_path="subdir", size=0, is_dir=True)
+        assert s3._make_s3_key("", info) == "subdir/"
+
+    def test_nested_path(self):
+        info = s3.FileInfo(relative_path="a/b/c.txt", size=50, is_dir=False)
+        assert s3._make_s3_key("prefix", info) == "prefix/a/b/c.txt"
+
+    def test_nested_dir(self):
+        info = s3.FileInfo(relative_path="a/b", size=0, is_dir=True)
+        assert s3._make_s3_key("prefix", info) == "prefix/a/b/"
+
+    def test_dir_already_trailing_slash_prefix(self):
+        """Prefix with trailing slash in relative_path shouldn't double-slash."""
+        info = s3.FileInfo(relative_path="sub/", size=0, is_dir=True)
+        result = s3._make_s3_key("data", info)
+        assert result == "data/sub/"
+        assert "//" not in result
+
+
 class TestS3URLParsing:
     def test_parse_s3_url_valid(self):
         assert s3._parse_s3_url("s3://bucket/path/to/data") == (
@@ -158,6 +195,36 @@ class TestUpload:
 
         assert mock_s3.upload_file.call_count >= 1
         assert mock_s3.delete_object.call_count == 1
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_delete_directory_marker_trailing_slash(self, mock_boto_client):
+        """Test that deleting a directory from S3 uses trailing slash to match directory markers."""
+        # S3 has a directory marker "output/subdir/" and a file "output/file.txt"
+        paginate = [
+            {
+                "Contents": [
+                    {"Key": "output/subdir/", "Size": 0},  # Directory marker with trailing slash
+                    {"Key": "output/file.txt", "Size": 5},
+                ]
+            }
+        ]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            # Local only has file.txt - subdir was deleted locally
+            (output / "file.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload("s3://bucket/output", local=output, interval=None)
+
+        # The directory marker should be deleted with trailing slash
+        delete_calls = mock_s3.delete_object.call_args_list
+        deleted_keys = [call[1]["Key"] for call in delete_calls]
+        assert "output/subdir/" in deleted_keys, (
+            f"Expected delete of 'output/subdir/' but got: {deleted_keys}"
+        )
 
     @patch(BOTO3_PATCH_TARGET)
     def test_background_sync_uploads_repeatedly(self, mock_boto_client):
