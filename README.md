@@ -173,3 +173,65 @@ with pos3.mirror(default_profile='nebius-public'):
 ```
 
 Each profile has a `local_name` used in the cache path to keep files from different endpoints separate. When registering profiles, `local_name` defaults to the profile name. The default AWS profile uses `_` as its local name.
+
+### Explicit per-path profile selection (CLI / isolated endpoints)
+
+For CLI tools where the S3 path is the *only* thing the user controls, the profile
+can be selected directly in the URL via the userinfo slot:
+
+```bash
+some-pos3-cli --dataset.path=s3://acme@bucket/dataset/
+```
+
+- The scheme stays `s3://`, so the URL still parses with standard URL tooling.
+- `pos3` extracts `acme` as the profile name and strips it before handing the
+  bucket/key to boto3. All parsing happens in the single `_parse_s3_url`
+  chokepoint, so **no changes are needed in consuming tools** — the path string
+  already flows through `pos3.download()`.
+- A profile in the URL **takes precedence** over an explicit `profile=` argument.
+- No userinfo → behavior is unchanged (boto3 default chain). There is no
+  implicit bucket→profile inference anywhere.
+- An unknown profile is a **hard error** — there is no silent fallback.
+
+### On-disk profile registry
+
+CLI users (who cannot call `register_profile(...)` in code) can define profiles
+in a local TOML file that `pos3` auto-loads. It is keyed by **profile name only**
+(never by bucket) and supports multiple named profiles. The default location is
+`~/.config/pos3/profiles.toml`, overridable with the `POS3_PROFILES` environment
+variable:
+
+```toml
+[profiles.acme]
+endpoint = "https://s3.example-provider.com"
+region   = "eu-north1"
+credentials_file = "~/.config/pos3/acme.creds"   # secret kept separate
+
+[profiles.public-mirror]
+endpoint = "https://storage.example.com"
+public   = true
+```
+
+- Non-secret config (endpoint/region) is separate from the secret credentials
+  file, mirroring AWS's config/credentials split. Only the credentials file is
+  secret; it lives outside code and is the one file you must keep private.
+- The `credentials_file` is an AWS-style INI file. `pos3` reads the section
+  matching the profile name, else a `[default]` section, else the only section:
+
+  ```ini
+  [acme]
+  aws_access_key_id = AKIA...
+  aws_secret_access_key = ...
+  # aws_session_token = ...   # optional
+  ```
+
+- Each registry profile with credentials builds its **own isolated
+  `boto3.Session`**, so it never reads or mutates the recipient's ambient AWS
+  configuration (env vars, `AWS_PROFILE`, `~/.aws/credentials`) in either
+  direction.
+- Profiles registered in code via `register_profile()` take precedence over the
+  on-disk registry if both define the same name.
+
+The net result: a recipient can be given one path plus a one-time local config,
+and every `pos3`-powered CLI works with no env vars, no code, and no collision
+with their own AWS setup.

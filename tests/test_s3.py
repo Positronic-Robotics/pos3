@@ -222,9 +222,7 @@ class TestUpload:
         # The directory marker should be deleted with trailing slash
         delete_calls = mock_s3.delete_object.call_args_list
         deleted_keys = [call[1]["Key"] for call in delete_calls]
-        assert "output/subdir/" in deleted_keys, (
-            f"Expected delete of 'output/subdir/' but got: {deleted_keys}"
-        )
+        assert "output/subdir/" in deleted_keys, f"Expected delete of 'output/subdir/' but got: {deleted_keys}"
 
     @patch(BOTO3_PATCH_TARGET)
     def test_background_sync_uploads_repeatedly(self, mock_boto_client):
@@ -959,9 +957,9 @@ class TestPrefixBoundaryMatching:
                 paginator_calls = mock_s3.get_paginator.return_value.paginate.call_args_list
                 assert len(paginator_calls) == 1
                 call_kwargs = paginator_calls[0][1]
-                assert (
-                    call_kwargs["Prefix"] == "data/"
-                ), f"Expected Prefix='data/' but got Prefix='{call_kwargs['Prefix']}'"
+                assert call_kwargs["Prefix"] == "data/", (
+                    f"Expected Prefix='data/' but got Prefix='{call_kwargs['Prefix']}'"
+                )
 
     @patch(BOTO3_PATCH_TARGET)
     def test_prefix_boundary_with_trailing_slash(self, mock_boto_client):
@@ -1263,3 +1261,162 @@ class TestProfile:
                 found_late_call = True
                 break
         assert found_late_call, "Expected profile to be resolved at call time"
+
+
+class TestS3UrlProfileSelector:
+    def test_parse_s3_url_strips_userinfo(self):
+        assert s3._parse_s3_url("s3://acme@bucket/path/to/data") == ("bucket", "path/to/data")
+        assert s3._parse_s3_url("s3://acme@bucket/") == ("bucket", "")
+
+    def test_parse_s3_url_no_userinfo_unchanged(self):
+        assert s3._parse_s3_url("s3://bucket/path") == ("bucket", "path")
+
+    def test_normalize_strips_userinfo(self):
+        assert s3._normalize_s3_url("s3://acme@bucket/data/") == "s3://bucket/data"
+
+    def test_parse_s3_profile(self):
+        assert s3._parse_s3_profile("s3://acme@bucket/key") == "acme"
+        assert s3._parse_s3_profile("s3://bucket/key") is None
+
+    def test_parse_s3_profile_empty_is_error(self):
+        with pytest.raises(ValueError, match="no profile name"):
+            s3._parse_s3_profile("s3://@bucket/key")
+
+    def test_url_profile_takes_precedence_over_arg(self):
+        assert s3._url_profile_or("s3://urlprof@bucket/k", "argprof") == "urlprof"
+        assert s3._url_profile_or("s3://bucket/k", "argprof") == "argprof"
+        assert s3._url_profile_or("/local/path", "argprof") == "argprof"
+
+
+class TestProfileRegistry:
+    def setup_method(self):
+        s3._PROFILES.clear()
+        s3._reset_profile_registry_cache()
+
+    def teardown_method(self):
+        s3._PROFILES.clear()
+        s3._reset_profile_registry_cache()
+
+    def _write_registry(self, tmpdir, body):
+        path = Path(tmpdir) / "profiles.toml"
+        path.write_text(body)
+        return path
+
+    def test_unknown_profile_hard_error_mentions_registry(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = Path(tmpdir) / "profiles.toml"
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+            with pytest.raises(ValueError, match="Unknown profile.*profiles.toml"):
+                s3._resolve_profile("ghost")
+
+    def test_resolve_profile_from_registry(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = self._write_registry(
+                tmpdir,
+                '[profiles.acme]\nendpoint = "https://s3.acme.example.com"\nregion = "eu-north1"\n',
+            )
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+
+            profile = s3._resolve_profile("acme")
+            assert profile.endpoint == "https://s3.acme.example.com"
+            assert profile.region == "eu-north1"
+            assert profile.local_name == "acme"
+
+    def test_registry_missing_endpoint_errors(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = self._write_registry(tmpdir, '[profiles.acme]\nregion = "x"\n')
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+            with pytest.raises(ValueError, match="missing required 'endpoint'"):
+                s3._resolve_profile("acme")
+
+    def test_code_profile_takes_precedence_over_registry(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = self._write_registry(tmpdir, '[profiles.dup]\nendpoint = "https://from-file.example.com"\n')
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+            s3.register_profile("dup", endpoint="https://from-code.example.com")
+
+            assert s3._resolve_profile("dup").endpoint == "https://from-code.example.com"
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_uses_url_profile_from_registry(self, mock_boto_client, monkeypatch):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = self._write_registry(tmpdir, '[profiles.acme]\nendpoint = "https://s3.acme.example.com"\n')
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                path = s3.download("s3://acme@bucket/data")
+
+            # Cache path isolated by profile name, URL userinfo stripped from bucket/key
+            assert "acme" in str(path)
+            assert "bucket" in str(path)
+            assert any(
+                c[1].get("endpoint_url") == "https://s3.acme.example.com" for c in mock_boto_client.call_args_list
+            )
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_url_profile_overrides_explicit_arg(self, mock_boto_client, monkeypatch):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = self._write_registry(
+                tmpdir,
+                '[profiles.urlp]\nendpoint = "https://url.example.com"\n'
+                '[profiles.argp]\nendpoint = "https://arg.example.com"\n',
+            )
+            monkeypatch.setenv("POS3_PROFILES", str(reg))
+            s3._reset_profile_registry_cache()
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://urlp@bucket/data", profile="argp")
+
+            endpoints = {c[1].get("endpoint_url") for c in mock_boto_client.call_args_list}
+            assert "https://url.example.com" in endpoints
+            assert "https://arg.example.com" not in endpoints
+
+    def test_credentials_file_builds_isolated_session(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds = Path(tmpdir) / "acme.creds"
+            creds.write_text("[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = secret123\n")
+            profile = s3.Profile(
+                local_name="acme",
+                endpoint="https://s3.acme.example.com",
+                credentials_file=str(creds),
+            )
+            with patch("pos3.boto3.Session") as mock_session:
+                s3._create_s3_client(profile)
+
+            mock_session.assert_called_once()
+            kwargs = mock_session.call_args[1]
+            assert kwargs["aws_access_key_id"] == "AKIAEXAMPLE"
+            assert kwargs["aws_secret_access_key"] == "secret123"
+            mock_session.return_value.client.assert_called_once()
+            client_kwargs = mock_session.return_value.client.call_args[1]
+            assert client_kwargs["endpoint_url"] == "https://s3.acme.example.com"
+
+    def test_credentials_file_missing_errors(self):
+        profile = s3.Profile(
+            local_name="acme",
+            endpoint="https://s3.acme.example.com",
+            credentials_file="/nonexistent/path.creds",
+        )
+        with pytest.raises(ValueError, match="Credentials file.*not found"):
+            s3._create_s3_client(profile)
+
+    def test_credentials_section_named_after_profile(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds = Path(tmpdir) / "c.creds"
+            creds.write_text(
+                "[other]\naws_access_key_id = X\naws_secret_access_key = Y\n"
+                "[acme]\naws_access_key_id = RIGHT\naws_secret_access_key = KEY\n"
+            )
+            loaded = s3._load_credentials(str(creds), "acme")
+            assert loaded["aws_access_key_id"] == "RIGHT"

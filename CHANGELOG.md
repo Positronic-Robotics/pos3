@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0] - 2026-05-19
+
+### Added
+- Explicit per-path S3 profile selection via the URL userinfo slot
+  (`s3://profile@bucket/key`). Parsing is confined to the single `_parse_s3_url`
+  chokepoint, so consuming CLI tools need no changes. ([#8](https://github.com/Positronic-Robotics/pos3/issues/8))
+- On-disk, name-keyed profile registry auto-loaded from a TOML file
+  (`~/.config/pos3/profiles.toml`, overridable via `POS3_PROFILES`), supporting
+  multiple named profiles with a non-secret/secret config split.
+- `credentials_file` field on `Profile`: registry profiles build their own
+  isolated `boto3.Session` from an AWS-style INI credentials file, never reading
+  or mutating the user's ambient AWS configuration.
+- `_parse_s3_profile()` helper exported alongside `_parse_s3_url()`.
+
+### Behavior
+- A profile in the URL takes precedence over an explicit `profile=` argument.
+- An unknown profile is a hard error with no silent fallback to the default chain.
+- No userinfo → behavior unchanged (boto3 default chain). No implicit
+  bucket→profile inference.
+
 ## [0.2.2] - 2026-02-06
 
 ### Fixed

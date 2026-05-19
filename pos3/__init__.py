@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import configparser
 import logging
+import os
 import shutil
 import threading
 import time
@@ -22,6 +24,11 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
+try:  # Python 3.11+
+    import tomllib as _tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on Python < 3.11
+    import tomli as _tomllib
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,12 +41,16 @@ class Profile:
         endpoint: S3 endpoint URL (e.g., 'https://storage.eu-north1.nebius.cloud').
         public: If True, use anonymous access (no credentials required).
         region: Optional AWS region name.
+        credentials_file: Optional path to an AWS-style INI credentials file. When set,
+            the profile builds its own isolated boto3 Session from these credentials,
+            never reading or mutating the user's ambient AWS configuration.
     """
 
     local_name: str
     endpoint: str
     public: bool = False
     region: str | None = None
+    credentials_file: str | None = None
 
     def __post_init__(self):
         if self.local_name == "_":
@@ -70,23 +81,107 @@ def register_profile(
     _PROFILES[name] = config
 
 
+_DEFAULT_REGISTRY_PATH = "~/.config/pos3/profiles.toml"
+_PROFILE_REGISTRY_ENV = "POS3_PROFILES"
+
+_registry_lock = threading.RLock()
+_registry_cache: tuple[Path, dict[str, Profile]] | None = None
+
+
+def _profile_registry_path() -> Path:
+    return Path(os.environ.get(_PROFILE_REGISTRY_ENV, _DEFAULT_REGISTRY_PATH)).expanduser()
+
+
+def _reset_profile_registry_cache() -> None:
+    """Drop the cached on-disk profile registry (used by tests)."""
+    global _registry_cache
+    with _registry_lock:
+        _registry_cache = None
+
+
+def _load_credentials(credentials_file: str, profile_name: str) -> dict[str, str]:
+    """Load AWS-style INI credentials kept separate from the non-secret config."""
+    path = Path(credentials_file).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Credentials file for profile '{profile_name}' not found: {path}")
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    sections = parser.sections()
+    if profile_name in parser:
+        section = profile_name
+    elif "default" in parser:
+        section = "default"
+    elif len(sections) == 1:
+        section = sections[0]
+    else:
+        raise ValueError(
+            f"Credentials file {path} must contain a section named '{profile_name}', "
+            f"a 'default' section, or exactly one section"
+        )
+    values = parser[section]
+    try:
+        creds = {
+            "aws_access_key_id": values["aws_access_key_id"],
+            "aws_secret_access_key": values["aws_secret_access_key"],
+        }
+    except KeyError as exc:
+        raise ValueError(f"Credentials section [{section}] in {path} is missing {exc}") from exc
+    if "aws_session_token" in values:
+        creds["aws_session_token"] = values["aws_session_token"]
+    return creds
+
+
+def _load_profile_registry() -> dict[str, Profile]:
+    """Load and cache the name-keyed local profile registry (auto-loaded TOML file)."""
+    global _registry_cache
+    path = _profile_registry_path()
+    with _registry_lock:
+        if _registry_cache is not None and _registry_cache[0] == path:
+            return _registry_cache[1]
+
+        profiles: dict[str, Profile] = {}
+        if path.is_file():
+            with open(path, "rb") as fh:
+                data = _tomllib.load(fh)
+            for name, cfg in (data.get("profiles") or {}).items():
+                if "endpoint" not in cfg:
+                    raise ValueError(f"Profile '{name}' in {path} is missing required 'endpoint'")
+                profiles[name] = Profile(
+                    local_name=name,
+                    endpoint=cfg["endpoint"],
+                    public=bool(cfg.get("public", False)),
+                    region=cfg.get("region"),
+                    credentials_file=cfg.get("credentials_file"),
+                )
+        _registry_cache = (path, profiles)
+        return profiles
+
+
 def _resolve_profile(profile: str | Profile | None) -> Profile | None:
     """Resolve a profile name to a Profile object.
 
     Args:
-        profile: None, registered profile name (string), or Profile object.
+        profile: None, profile name (string), or Profile object. A string is
+            looked up first among profiles registered in code via
+            register_profile(), then in the on-disk profile registry.
 
     Returns:
         Profile object or None.
 
     Raises:
-        ValueError: If profile is a string that is not registered.
+        ValueError: If profile is a string that is not registered anywhere.
     """
     if profile is None or isinstance(profile, Profile):
         return profile
-    if profile not in _PROFILES:
-        raise ValueError(f"Unknown profile: '{profile}'. Register with pos3.register_profile() first.")
-    return _PROFILES[profile]
+    if profile in _PROFILES:
+        return _PROFILES[profile]
+    registry = _load_profile_registry()
+    if profile in registry:
+        return registry[profile]
+    raise ValueError(
+        f"Unknown profile: '{profile}'. Register with pos3.register_profile() "
+        f"or define it in {_profile_registry_path()}."
+    )
 
 
 def _create_s3_client(profile: Profile | None = None):
@@ -106,6 +201,17 @@ def _create_s3_client(profile: Profile | None = None):
     if profile.public:
         kwargs["config"] = Config(signature_version=UNSIGNED)
 
+    if profile.credentials_file:
+        creds = _load_credentials(profile.credentials_file, profile.local_name)
+        # Own isolated Session: never reads or mutates the user's ambient AWS config.
+        session = boto3.Session(
+            aws_access_key_id=creds["aws_access_key_id"],
+            aws_secret_access_key=creds["aws_secret_access_key"],
+            aws_session_token=creds.get("aws_session_token"),
+            region_name=profile.region,
+        )
+        return session.client("s3", **kwargs)
+
     return boto3.client("s3", **kwargs)
 
 
@@ -118,10 +224,42 @@ class _NullTqdm(nullcontext):
 
 
 def _parse_s3_url(s3_url: str) -> tuple[str, str]:
+    """Parse an S3 URL into (bucket, key).
+
+    Any ``profile@`` userinfo is the single chokepoint where the profile selector
+    is stripped, so bucket/key handed to boto3 never carry it.
+    """
     parsed = urlparse(s3_url)
     if parsed.scheme != "s3":
         raise ValueError(f"Not an S3 URL: {s3_url}")
-    return parsed.netloc, parsed.path.lstrip("/")
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = netloc.rpartition("@")[2]
+    return netloc, parsed.path.lstrip("/")
+
+
+def _parse_s3_profile(s3_url: str) -> str | None:
+    """Extract the explicit profile selector from an ``s3://profile@bucket/key`` URL.
+
+    Returns the profile name, or None when no userinfo is present. An ``@`` with
+    an empty profile name is a hard error (no silent fallback).
+    """
+    parsed = urlparse(s3_url)
+    if parsed.scheme != "s3" or "@" not in parsed.netloc:
+        return None
+    name = parsed.username
+    if not name:
+        raise ValueError(f"S3 URL has '@' but no profile name: {s3_url}")
+    return name
+
+
+def _url_profile_or(remote: str, profile: str | Profile | None) -> str | Profile | None:
+    """A profile selector in the URL takes precedence over an explicit argument."""
+    if isinstance(remote, str) and _is_s3_path(remote):
+        url_profile = _parse_s3_profile(remote)
+        if url_profile is not None:
+            return url_profile
+    return profile
 
 
 def _normalize_s3_url(s3_url: str) -> str:
@@ -383,6 +521,7 @@ class _Mirror:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
         """
+        profile = _url_profile_or(remote, profile)
         effective_profile = self._effective_profile(profile)
 
         if not _is_s3_path(remote):
@@ -459,6 +598,7 @@ class _Mirror:
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
         """
+        profile = _url_profile_or(remote, profile)
         effective_profile = self._effective_profile(profile)
 
         if not _is_s3_path(remote):
@@ -511,6 +651,7 @@ class _Mirror:
         profile: str | Profile | None = None,
     ) -> Path:
         # Let download() and upload() handle profile resolution and normalization
+        profile = _url_profile_or(remote, profile)
         local_path = self.download(remote, local, delete_local, exclude, profile)
         if not _is_s3_path(remote):
             return local_path
@@ -523,6 +664,7 @@ class _Mirror:
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
+        profile = _url_profile_or(prefix, profile)
         effective_profile = self._effective_profile(profile)
 
         if _is_s3_path(prefix):
@@ -1016,4 +1158,15 @@ def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = Non
     return mirror_obj.ls(prefix, recursive, profile)
 
 
-__all__ = ["mirror", "with_mirror", "download", "upload", "sync", "ls", "register_profile", "Profile", "_parse_s3_url"]
+__all__ = [
+    "mirror",
+    "with_mirror",
+    "download",
+    "upload",
+    "sync",
+    "ls",
+    "register_profile",
+    "Profile",
+    "_parse_s3_url",
+    "_parse_s3_profile",
+]
