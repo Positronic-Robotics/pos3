@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pos3"
-version = "0.2.2"
+version = "0.3.0"
 description = "S3 Simple Sync - Make using S3 as simple as using local files"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "boto3>=1.26.0",
     "tqdm>=4.65.0",
+    "tomli>=1.1.0; python_version < '3.11'",
 ]
 
 [project.urls]

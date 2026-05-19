@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ from botocore.exceptions import ClientError
 import pos3 as s3
 
 BOTO3_PATCH_TARGET = "pos3.boto3.client"
+SESSION_PATCH_TARGET = "pos3.boto3.session.Session"
 
 
 def _make_404_error(*_args, **_kwargs):
@@ -1263,3 +1265,138 @@ class TestProfile:
                 found_late_call = True
                 break
         assert found_late_call, "Expected profile to be resolved at call time"
+
+
+class TestUrlProfileParsing:
+    def test_url_profile_extracted(self):
+        assert s3._url_profile("s3://acme@bucket/key") == "acme"
+
+    def test_url_profile_absent(self):
+        assert s3._url_profile("s3://bucket/key") is None
+
+    def test_url_profile_non_s3(self):
+        assert s3._url_profile("/local/path") is None
+
+    def test_parse_strips_userinfo(self):
+        assert s3._parse_s3_url("s3://acme@bucket/path/to/data") == ("bucket", "path/to/data")
+
+    def test_normalize_strips_userinfo(self):
+        assert s3._normalize_s3_url("s3://acme@bucket/path/") == "s3://bucket/path"
+
+
+class TestProfileRegistry:
+    def setup_method(self):
+        s3._PROFILES.clear()
+        s3._REGISTRY_LOADED = False
+        self._saved_env = os.environ.get("POS3_PROFILES_FILE")
+
+    def teardown_method(self):
+        s3._PROFILES.clear()
+        s3._REGISTRY_LOADED = False
+        if self._saved_env is None:
+            os.environ.pop("POS3_PROFILES_FILE", None)
+        else:
+            os.environ["POS3_PROFILES_FILE"] = self._saved_env
+
+    def _write_registry(self, tmpdir, body):
+        path = Path(tmpdir) / "profiles.toml"
+        path.write_text(body)
+        os.environ["POS3_PROFILES_FILE"] = str(path)
+        return path
+
+    def test_registry_loaded_lazily(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(
+                tmpdir,
+                '[profiles.acme]\nendpoint = "https://s3.acme.example.com"\nregion = "us-east-1"\n',
+            )
+            profile = s3._resolve_profile("acme")
+
+        assert profile.endpoint == "https://s3.acme.example.com"
+        assert profile.region == "us-east-1"
+        assert profile.local_name == "acme"
+
+    def test_unknown_profile_hard_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(tmpdir, '[profiles.known]\nendpoint = "https://k.example.com"\n')
+            with pytest.raises(ValueError, match="Unknown profile"):
+                s3._resolve_profile("missing")
+
+    def test_missing_endpoint_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(tmpdir, '[profiles.bad]\nregion = "us-east-1"\n')
+            with pytest.raises(ValueError, match="missing required 'endpoint'"):
+                s3._resolve_profile("bad")
+
+    def test_programmatic_registration_wins(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(tmpdir, '[profiles.dup]\nendpoint = "https://from-file.example.com"\n')
+            s3.register_profile("dup", endpoint="https://from-code.example.com")
+            profile = s3._resolve_profile("dup")
+
+        assert profile.endpoint == "https://from-code.example.com"
+
+    def test_credentials_file_isolated_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds = Path(tmpdir) / "acme.creds"
+            creds.write_text("[acme]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = secret123\n")
+            self._write_registry(
+                tmpdir,
+                f'[profiles.acme]\nendpoint = "https://s3.acme.example.com"\n'
+                f'region = "eu-west-1"\ncredentials_file = "{creds}"\n',
+            )
+            profile = s3._resolve_profile("acme")
+            assert profile.access_key == "AKIAEXAMPLE"
+            assert profile.secret_key == "secret123"
+
+            with patch(SESSION_PATCH_TARGET) as mock_session:
+                s3._create_s3_client(profile)
+
+            mock_session.assert_called_once()
+            session_kwargs = mock_session.call_args[1]
+            assert session_kwargs["aws_access_key_id"] == "AKIAEXAMPLE"
+            assert session_kwargs["aws_secret_access_key"] == "secret123"
+            assert session_kwargs["region_name"] == "eu-west-1"
+            client_kwargs = mock_session.return_value.client.call_args[1]
+            assert client_kwargs["endpoint_url"] == "https://s3.acme.example.com"
+
+    def test_secrets_not_in_repr(self):
+        profile = s3.Profile(
+            local_name="acme",
+            endpoint="https://s3.acme.example.com",
+            access_key="AKIAEXAMPLE",
+            secret_key="topsecret",
+        )
+        assert "topsecret" not in repr(profile)
+        assert "AKIAEXAMPLE" not in repr(profile)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_url_profile_takes_precedence_over_argument(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(
+                tmpdir,
+                '[profiles.url_prof]\nendpoint = "https://url.example.com"\n'
+                '[profiles.arg_prof]\nendpoint = "https://arg.example.com"\n',
+            )
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                path = s3.download("s3://url_prof@bucket/data", profile="arg_prof")
+
+            # Cache path keyed by the URL profile's local_name, not the argument.
+            assert "url_prof" in str(path)
+            assert "arg_prof" not in str(path)
+
+        endpoints = [c[1].get("endpoint_url") for c in mock_boto_client.call_args_list]
+        assert "https://url.example.com" in endpoints
+        assert "https://arg.example.com" not in endpoints
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_url_unknown_profile_hard_error(self, mock_boto_client):
+        _setup_s3_mock(mock_boto_client)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(tmpdir, '[profiles.known]\nendpoint = "https://k.example.com"\n')
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                with pytest.raises(ValueError, match="Unknown profile"):
+                    s3.download("s3://ghost@bucket/data")
