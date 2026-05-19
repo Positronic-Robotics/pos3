@@ -16,6 +16,14 @@
 - Unknown profile names (in URL or argument) are a hard error with no silent
   fallback to the default credential chain.
 
+### Changed
+- **Python 3.11+ is now required** (`requires-python = ">=3.11"`). The TOML
+  profile registry uses the standard-library `tomllib`; the previously
+  declared 3.9/3.10 support was never exercised by CI.
+- Profile logic (the `Profile` dataclass, registry loading, resolution, and
+  client creation) moved into the internal `pos3.profiles` module. The public
+  API (`pos3.Profile`, `pos3.register_profile`) is unchanged.
+
 ## [0.2.2] - 2026-02-06
 
 ### Fixed

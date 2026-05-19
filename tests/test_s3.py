@@ -10,8 +10,8 @@ from botocore.exceptions import ClientError
 
 import pos3 as s3
 
-BOTO3_PATCH_TARGET = "pos3.boto3.client"
-SESSION_PATCH_TARGET = "pos3.boto3.session.Session"
+BOTO3_PATCH_TARGET = "pos3.profiles.boto3.client"
+SESSION_PATCH_TARGET = "pos3.profiles.boto3.session.Session"
 
 
 def _make_404_error(*_args, **_kwargs):
@@ -1287,12 +1287,12 @@ class TestUrlProfileParsing:
 class TestProfileRegistry:
     def setup_method(self):
         s3._PROFILES.clear()
-        s3._REGISTRY_LOADED = False
+        s3.profiles._REGISTRY_LOADED = False
         self._saved_env = os.environ.get("POS3_PROFILES_FILE")
 
     def teardown_method(self):
         s3._PROFILES.clear()
-        s3._REGISTRY_LOADED = False
+        s3.profiles._REGISTRY_LOADED = False
         if self._saved_env is None:
             os.environ.pop("POS3_PROFILES_FILE", None)
         else:
