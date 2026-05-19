@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 import time
+import tomllib
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
@@ -23,11 +24,6 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python < 3.11
-    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 

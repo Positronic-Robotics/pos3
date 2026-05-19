@@ -7,7 +7,7 @@ name = "pos3"
 version = "0.3.0"
 description = "S3 Simple Sync - Make using S3 as simple as using local files"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Positronic Robotics", email = "hi@positronic.ro" }
@@ -21,7 +21,6 @@ classifiers = [
 dependencies = [
     "boto3>=1.26.0",
     "tqdm>=4.65.0",
-    "tomli>=1.1.0; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -47,7 +46,7 @@ addopts = "--cov=pos3 --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
