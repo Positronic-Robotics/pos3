@@ -16,97 +16,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
+from .profiles import _PROFILES as _PROFILES  # re-exported for tests/back-compat
+from .profiles import (
+    Profile,
+    _create_s3_client,
+    _resolve_profile,
+    _url_profile,
+    register_profile,
+)
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Profile:
-    """Configuration for an S3-compatible endpoint.
-
-    Attributes:
-        local_name: Identifier used in cache path (e.g., 'nebius'). Cannot be '_' (reserved).
-        endpoint: S3 endpoint URL (e.g., 'https://storage.eu-north1.nebius.cloud').
-        public: If True, use anonymous access (no credentials required).
-        region: Optional AWS region name.
-    """
-
-    local_name: str
-    endpoint: str
-    public: bool = False
-    region: str | None = None
-
-    def __post_init__(self):
-        if self.local_name == "_":
-            raise ValueError("Profile local_name cannot be '_' (reserved for default)")
-        if not self.local_name or not all(c.isalnum() or c in "-_" for c in self.local_name):
-            raise ValueError(f"Invalid local_name '{self.local_name}': use only alphanumeric, dash, underscore")
-
-
-_PROFILES: dict[str, Profile] = {}
-
-
-def register_profile(
-    name: str,
-    endpoint: str,
-    public: bool = False,
-    region: str | None = None,
-    local_name: str | None = None,
-) -> None:
-    """Register a named profile for S3 access.
-
-    Creates a Profile with the given parameters. See Profile class for field details.
-    The `local_name` defaults to the profile `name` if not specified.
-    """
-    config = Profile(local_name=local_name or name, endpoint=endpoint, public=public, region=region)
-    existing = _PROFILES.get(name)
-    if existing is not None and existing != config:
-        raise ValueError(f"Profile '{name}' already registered with different config")
-    _PROFILES[name] = config
-
-
-def _resolve_profile(profile: str | Profile | None) -> Profile | None:
-    """Resolve a profile name to a Profile object.
-
-    Args:
-        profile: None, registered profile name (string), or Profile object.
-
-    Returns:
-        Profile object or None.
-
-    Raises:
-        ValueError: If profile is a string that is not registered.
-    """
-    if profile is None or isinstance(profile, Profile):
-        return profile
-    if profile not in _PROFILES:
-        raise ValueError(f"Unknown profile: '{profile}'. Register with pos3.register_profile() first.")
-    return _PROFILES[profile]
-
-
-def _create_s3_client(profile: Profile | None = None):
-    """Create boto3 S3 client, optionally using a profile.
-
-    Args:
-        profile: None (use boto3 defaults) or Profile config.
-    """
-    if profile is None:
-        return boto3.client("s3")
-
-    kwargs: dict[str, Any] = {"endpoint_url": profile.endpoint}
-
-    if profile.region:
-        kwargs["region_name"] = profile.region
-
-    if profile.public:
-        kwargs["config"] = Config(signature_version=UNSIGNED)
-
-    return boto3.client("s3", **kwargs)
 
 
 class _NullTqdm(nullcontext):
@@ -121,7 +43,12 @@ def _parse_s3_url(s3_url: str) -> tuple[str, str]:
     parsed = urlparse(s3_url)
     if parsed.scheme != "s3":
         raise ValueError(f"Not an S3 URL: {s3_url}")
-    return parsed.netloc, parsed.path.lstrip("/")
+    netloc = parsed.netloc
+    if "@" in netloc:
+        # Drop the explicit profile selector from the userinfo slot; it is a
+        # routing hint, not part of the bucket identity.
+        netloc = netloc.rsplit("@", 1)[1]
+    return netloc, parsed.path.lstrip("/")
 
 
 def _normalize_s3_url(s3_url: str) -> str:
@@ -327,8 +254,17 @@ class _Mirror:
         self._stop_event: threading.Event | None = None
         self._sync_thread: threading.Thread | None = None
 
-    def _effective_profile(self, profile: str | Profile | None) -> Profile | None:
-        """Resolve profile name and substitute default if None."""
+    def _effective_profile(self, profile: str | Profile | None, remote: str | None = None) -> Profile | None:
+        """Resolve the effective profile for an operation.
+
+        An explicit profile in the S3 URL userinfo slot
+        (`s3://<profile>@bucket/key`) takes precedence over the `profile=`
+        argument. Falls back to the context default when nothing is specified.
+        """
+        if remote is not None and _is_s3_path(remote):
+            url_profile = _url_profile(remote)
+            if url_profile is not None:
+                profile = url_profile
         resolved = _resolve_profile(profile)
         return resolved if resolved is not None else self._default_profile
 
@@ -383,7 +319,7 @@ class _Mirror:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
         """
-        effective_profile = self._effective_profile(profile)
+        effective_profile = self._effective_profile(profile, remote)
 
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
@@ -459,7 +395,7 @@ class _Mirror:
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
         """
-        effective_profile = self._effective_profile(profile)
+        effective_profile = self._effective_profile(profile, remote)
 
         if not _is_s3_path(remote):
             path = Path(remote).expanduser().resolve()
@@ -516,14 +452,14 @@ class _Mirror:
             return local_path
 
         normalized = _normalize_s3_url(remote)
-        effective_profile = self._effective_profile(profile)
+        effective_profile = self._effective_profile(profile, remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop((normalized, effective_profile), None)
         return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile)
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
-        effective_profile = self._effective_profile(profile)
+        effective_profile = self._effective_profile(profile, prefix)
 
         if _is_s3_path(prefix):
             normalized = _normalize_s3_url(prefix)

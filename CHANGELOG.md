@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0] - 2026-05-19
+
+### Added
+- Explicit per-path S3 profile selection via the URL userinfo slot:
+  `s3://<profile>@bucket/key` ([#8](https://github.com/Positronic-Robotics/pos3/issues/8)).
+  A profile in the URL takes precedence over the `profile=` argument and works
+  for every pos3-powered CLI without code or env-var changes.
+- Name-keyed local profile registry auto-loaded from
+  `~/.config/pos3/profiles.toml` (override with `POS3_PROFILES_FILE`).
+  Non-secret config (`endpoint`/`region`/`local_name`/`public`) is kept
+  separate from a secret `credentials_file`.
+- Profiles with explicit credentials build their own isolated `boto3.Session`,
+  never reading or mutating the user's ambient AWS configuration.
+- Unknown profile names (in URL or argument) are a hard error with no silent
+  fallback to the default credential chain.
+
+### Changed
+- **Python 3.11+ is now required** (`requires-python = ">=3.11"`). The TOML
+  profile registry uses the standard-library `tomllib`; the previously
+  declared 3.9/3.10 support was never exercised by CI.
+- Profile logic (the `Profile` dataclass, registry loading, resolution, and
+  client creation) moved into the internal `pos3.profiles` module. The public
+  API (`pos3.Profile`, `pos3.register_profile`) is unchanged.
+
 ## [0.2.2] - 2026-02-06
 
 ### Fixed

@@ -173,3 +173,52 @@ with pos3.mirror(default_profile='nebius-public'):
 ```
 
 Each profile has a `local_name` used in the cache path to keep files from different endpoints separate. When registering profiles, `local_name` defaults to the profile name. The default AWS profile uses `_` as its local name.
+
+#### Explicit profile selection in the URL
+
+For CLI tools where the S3 path is the only thing the user controls, a profile
+can be selected directly in the URL using the userinfo slot:
+
+```bash
+some-pos3-cli --dataset.path=s3://acme@bucket/dataset/
+```
+
+- The scheme stays `s3://`, so the URL still parses with standard tooling.
+- pos3 extracts the profile name, resolves it, and strips it before talking to
+  boto3 — no changes are needed in consuming tools.
+- A profile in the URL **takes precedence** over an explicit `profile=`
+  argument.
+- An unknown profile is a **hard error** — there is no silent fallback to the
+  default credential chain.
+- No userinfo means the behavior is unchanged (boto3 default chain or the
+  context default profile).
+
+#### Local profile registry
+
+pos3 auto-loads named profiles from `~/.config/pos3/profiles.toml` (override
+the location with the `POS3_PROFILES_FILE` environment variable, or use
+`XDG_CONFIG_HOME`). This lets a recipient run any pos3-powered CLI against a
+custom S3-compatible endpoint with isolated credentials — no env vars, no code,
+no collision with their own AWS setup:
+
+```toml
+[profiles.acme]
+endpoint = "https://s3.example-provider.com"
+region   = "us-east-1"
+# Optional: secret kept in a separate file (AWS-style INI).
+credentials_file = "~/.config/pos3/acme.creds"
+```
+
+```ini
+# ~/.config/pos3/acme.creds
+[acme]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+# aws_session_token = ...   # optional
+```
+
+The non-secret config (endpoint/region) is safe to share or commit; the
+credentials file is the only secret and lives outside code. Each profile builds
+its **own isolated `boto3.Session`**, so it never reads or mutates the user's
+ambient AWS configuration in either direction. Programmatically registered
+profiles take precedence over registry entries of the same name.
