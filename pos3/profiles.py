@@ -87,11 +87,14 @@ def _default_profiles_path() -> Path:
     return base / "pos3" / "profiles.toml"
 
 
-def _load_credentials_file(creds_path: Path, profile_name: str) -> tuple[str | None, str | None, str | None]:
+def _load_credentials_file(creds_path: Path, profile_name: str) -> tuple[str, str, str | None]:
     """Read AWS-style credentials for a profile from a separate secret file.
 
     The file uses INI sections (like ~/.aws/credentials). The section named
     after the profile is preferred, then 'default', then the first section.
+    Both `aws_access_key_id` and `aws_secret_access_key` are required: a
+    half-populated credentials file would otherwise silently fall back to the
+    ambient AWS credential chain, defeating the point of isolated profiles.
     """
     parser = configparser.ConfigParser()
     if not parser.read(creds_path):
@@ -107,11 +110,14 @@ def _load_credentials_file(creds_path: Path, profile_name: str) -> tuple[str | N
         raise ValueError(f"No credentials section found in {creds_path}")
 
     sec = parser[section]
-    return (
-        sec.get("aws_access_key_id"),
-        sec.get("aws_secret_access_key"),
-        sec.get("aws_session_token"),
-    )
+    access_key = sec.get("aws_access_key_id")
+    secret_key = sec.get("aws_secret_access_key")
+    if not access_key or not secret_key:
+        raise ValueError(
+            f"Credentials section '{section}' in {creds_path} must define both "
+            "'aws_access_key_id' and 'aws_secret_access_key'."
+        )
+    return access_key, secret_key, sec.get("aws_session_token")
 
 
 def _profile_from_config(name: str, cfg: dict[str, Any], source: Path) -> Profile:
@@ -148,16 +154,19 @@ def _load_profile_registry(path: Path | None = None, force: bool = False) -> Non
     with _REGISTRY_LOCK:
         if _REGISTRY_LOADED and not force:
             return
-        _REGISTRY_LOADED = True
         registry_path = path if path is not None else _default_profiles_path()
-        if not registry_path.exists():
-            return
-        with open(registry_path, "rb") as fh:
-            data = tomllib.load(fh)
-        for name, cfg in data.get("profiles", {}).items():
-            if name in _PROFILES:
-                continue
-            _PROFILES[name] = _profile_from_config(name, cfg, registry_path)
+        if registry_path.exists():
+            with open(registry_path, "rb") as fh:
+                data = tomllib.load(fh)
+            # Build all profiles first so a malformed entry doesn't leave the
+            # registry half-loaded with a sticky _REGISTRY_LOADED flag.
+            new_profiles = {
+                name: _profile_from_config(name, cfg, registry_path)
+                for name, cfg in data.get("profiles", {}).items()
+                if name not in _PROFILES
+            }
+            _PROFILES.update(new_profiles)
+        _REGISTRY_LOADED = True
 
 
 def _resolve_profile(profile: str | Profile | None) -> Profile | None:

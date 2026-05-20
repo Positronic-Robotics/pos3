@@ -1336,6 +1336,31 @@ class TestProfileRegistry:
 
         assert profile.endpoint == "https://from-code.example.com"
 
+    def test_credentials_file_missing_secret_raises(self):
+        """A half-populated credentials file must fail loudly, not fall back to ambient creds."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds = Path(tmpdir) / "acme.creds"
+            creds.write_text("[acme]\naws_access_key_id = AKIAEXAMPLE\n")  # no secret
+            self._write_registry(
+                tmpdir,
+                f'[profiles.acme]\nendpoint = "https://s.example.com"\ncredentials_file = "{creds}"\n',
+            )
+            with pytest.raises(ValueError, match="aws_access_key_id.*aws_secret_access_key"):
+                s3._resolve_profile("acme")
+
+    def test_load_failure_is_not_sticky(self):
+        """A malformed registry must not flip _REGISTRY_LOADED on; subsequent loads should retry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(tmpdir, '[profiles.bad]\nregion = "us-east-1"\n')  # missing endpoint
+            with pytest.raises(ValueError, match="missing required 'endpoint'"):
+                s3._resolve_profile("bad")
+            assert s3.profiles._REGISTRY_LOADED is False
+
+            # Repair the registry and retry without manual reset.
+            self._write_registry(tmpdir, '[profiles.bad]\nendpoint = "https://fixed.example.com"\n')
+            profile = s3._resolve_profile("bad")
+            assert profile.endpoint == "https://fixed.example.com"
+
     def test_credentials_file_isolated_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             creds = Path(tmpdir) / "acme.creds"
