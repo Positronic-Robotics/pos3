@@ -45,9 +45,22 @@ class Profile:
             raise ValueError("Profile local_name cannot be '_' (reserved for default)")
         if not self.local_name or not all(c.isalnum() or c in "-_" for c in self.local_name):
             raise ValueError(f"Invalid local_name '{self.local_name}': use only alphanumeric, dash, underscore")
+        # access_key and secret_key are an AWS pair; one without the other
+        # would silently fall back to the ambient credential chain in
+        # _create_s3_client and route operations to the wrong account.
+        if bool(self.access_key) != bool(self.secret_key):
+            raise ValueError(
+                "Profile access_key and secret_key must be set together "
+                "(or both omitted to use the default credential chain)."
+            )
 
 
+# Profiles registered programmatically via register_profile. Lookups consult
+# this dict first, so a code registration unconditionally wins over a registry
+# entry of the same name regardless of load order.
 _PROFILES: dict[str, Profile] = {}
+# Profiles loaded from the on-disk registry. Consulted only as a fallback.
+_REGISTRY_PROFILES: dict[str, Profile] = {}
 
 
 def register_profile(
@@ -60,7 +73,9 @@ def register_profile(
     """Register a named profile for S3 access.
 
     Creates a Profile with the given parameters. See Profile class for field details.
-    The `local_name` defaults to the profile `name` if not specified.
+    The `local_name` defaults to the profile `name` if not specified. A code
+    registration always takes precedence over a registry-file entry of the same
+    name; re-registering the same name with a different config raises.
     """
     config = Profile(local_name=local_name or name, endpoint=endpoint, public=public, region=region)
     existing = _PROFILES.get(name)
@@ -159,8 +174,9 @@ def _profile_from_config(name: str, cfg: dict[str, Any], source: Path) -> Profil
 def _load_profile_registry(path: Path | None = None, force: bool = False) -> None:
     """Auto-load named profiles from the local registry file (once per process).
 
-    Programmatically registered profiles take precedence: a registry entry never
-    overrides a name already present in _PROFILES.
+    Registry entries are kept in a separate dict from programmatic registrations,
+    so a code register_profile() always wins over a registry entry of the same
+    name regardless of which happened first.
     """
     global _REGISTRY_LOADED
     with _REGISTRY_LOCK:
@@ -175,9 +191,8 @@ def _load_profile_registry(path: Path | None = None, force: bool = False) -> Non
             new_profiles = {
                 name: _profile_from_config(name, cfg, registry_path)
                 for name, cfg in data.get("profiles", {}).items()
-                if name not in _PROFILES
             }
-            _PROFILES.update(new_profiles)
+            _REGISTRY_PROFILES.update(new_profiles)
         _REGISTRY_LOADED = True
 
 
@@ -195,14 +210,19 @@ def _resolve_profile(profile: str | Profile | None) -> Profile | None:
     """
     if profile is None or isinstance(profile, Profile):
         return profile
-    if profile not in _PROFILES:
+    # Code registrations always win; only consult the on-disk registry as a fallback.
+    if profile in _PROFILES:
+        return _PROFILES[profile]
+    if profile not in _REGISTRY_PROFILES:
         _load_profile_registry()
-    if profile not in _PROFILES:
-        raise ValueError(
-            f"Unknown profile: '{profile}'. Register with pos3.register_profile() "
-            f"or define it in {_default_profiles_path()}."
-        )
-    return _PROFILES[profile]
+    if profile in _PROFILES:
+        return _PROFILES[profile]
+    if profile in _REGISTRY_PROFILES:
+        return _REGISTRY_PROFILES[profile]
+    raise ValueError(
+        f"Unknown profile: '{profile}'. Register with pos3.register_profile() "
+        f"or define it in {_default_profiles_path()}."
+    )
 
 
 def _url_profile(s3_url: str) -> str | None:

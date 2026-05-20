@@ -1106,6 +1106,19 @@ class TestProfile:
         Profile(local_name="valid_name", endpoint="https://storage.example.com")
         Profile(local_name="ValidName123", endpoint="https://storage.example.com")
 
+    def test_profile_partial_credentials_rejected(self):
+        """Half-set access_key/secret_key would fall back to ambient creds; reject at construction."""
+        from pos3 import Profile
+
+        common = {"local_name": "p", "endpoint": "https://s.example.com"}
+        with pytest.raises(ValueError, match="must be set together"):
+            Profile(**common, access_key="AKIA")
+        with pytest.raises(ValueError, match="must be set together"):
+            Profile(**common, secret_key="shh")
+        # Both set or both absent is fine.
+        Profile(**common, access_key="AKIA", secret_key="shh")
+        Profile(**common)
+
     def test_create_client_unknown_profile(self):
         """Test that using unknown profile raises error."""
         with pytest.raises(ValueError, match="Unknown profile"):
@@ -1295,11 +1308,13 @@ class TestUrlProfileParsing:
 class TestProfileRegistry:
     def setup_method(self):
         s3._PROFILES.clear()
+        s3.profiles._REGISTRY_PROFILES.clear()
         s3.profiles._REGISTRY_LOADED = False
         self._saved_env = os.environ.get("POS3_PROFILES_FILE")
 
     def teardown_method(self):
         s3._PROFILES.clear()
+        s3.profiles._REGISTRY_PROFILES.clear()
         s3.profiles._REGISTRY_LOADED = False
         if self._saved_env is None:
             os.environ.pop("POS3_PROFILES_FILE", None)
@@ -1343,6 +1358,20 @@ class TestProfileRegistry:
             profile = s3._resolve_profile("dup")
 
         assert profile.endpoint == "https://from-code.example.com"
+
+    def test_code_override_after_registry_load(self):
+        """Code-precedence must hold even when the registry was loaded first."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(
+                tmpdir,
+                '[profiles.dup]\nendpoint = "https://from-file.example.com"\n'
+                '[profiles.other]\nendpoint = "https://other.example.com"\n',
+            )
+            # Resolving any name first triggers registry load, populating "dup".
+            assert s3._resolve_profile("other").endpoint == "https://other.example.com"
+            # Now overriding "dup" in code must succeed and win.
+            s3.register_profile("dup", endpoint="https://from-code.example.com")
+            assert s3._resolve_profile("dup").endpoint == "https://from-code.example.com"
 
     def test_credentials_file_relative_to_registry(self):
         """A relative credentials_file path must resolve next to profiles.toml, not CWD."""
