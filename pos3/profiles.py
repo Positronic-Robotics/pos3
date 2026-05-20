@@ -90,11 +90,13 @@ def _default_profiles_path() -> Path:
 def _load_credentials_file(creds_path: Path, profile_name: str) -> tuple[str, str, str | None]:
     """Read AWS-style credentials for a profile from a separate secret file.
 
-    The file uses INI sections (like ~/.aws/credentials). The section named
-    after the profile is preferred, then 'default', then the first section.
-    Both `aws_access_key_id` and `aws_secret_access_key` are required: a
-    half-populated credentials file would otherwise silently fall back to the
-    ambient AWS credential chain, defeating the point of isolated profiles.
+    The file uses INI sections (like ~/.aws/credentials). Only the section
+    named after the profile or '[default]' is accepted; anything else is a
+    hard error. Both `aws_access_key_id` and `aws_secret_access_key` are
+    required. These guards exist because any silent fallback (to an
+    arbitrary section, or to the ambient AWS credential chain) could route
+    operations to the wrong account, defeating the point of isolated
+    per-profile credentials.
     """
     parser = configparser.ConfigParser()
     if not parser.read(creds_path):
@@ -104,10 +106,14 @@ def _load_credentials_file(creds_path: Path, profile_name: str) -> tuple[str, st
         section = profile_name
     elif parser.has_section("default"):
         section = "default"
-    elif parser.sections():
-        section = parser.sections()[0]
     else:
-        raise ValueError(f"No credentials section found in {creds_path}")
+        # Don't fall back to an arbitrary section: a typo in the profile-name
+        # header would otherwise silently bind credentials from an unrelated
+        # account, defeating the point of isolated per-profile credentials.
+        raise ValueError(
+            f"Credentials file {creds_path} must contain a [{profile_name}] "
+            f"or [default] section; found sections: {parser.sections()}"
+        )
 
     sec = parser[section]
     access_key = sec.get("aws_access_key_id")

@@ -1377,6 +1377,19 @@ class TestProfileRegistry:
             with pytest.raises(ValueError, match="aws_access_key_id.*aws_secret_access_key"):
                 s3._resolve_profile("acme")
 
+    def test_credentials_file_wrong_section_raises(self):
+        """A typo in the section name must not silently bind credentials from an unrelated section."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds = Path(tmpdir) / "acme.creds"
+            # Typo: section says 'acne' instead of 'acme'; no [default] either.
+            creds.write_text("[acne]\naws_access_key_id = WRONG\naws_secret_access_key = wrong\n")
+            self._write_registry(
+                tmpdir,
+                f'[profiles.acme]\nendpoint = "https://s.example.com"\ncredentials_file = "{creds}"\n',
+            )
+            with pytest.raises(ValueError, match=r"\[acme\] or \[default\] section"):
+                s3._resolve_profile("acme")
+
     def test_load_failure_is_not_sticky(self):
         """A malformed registry must not flip _REGISTRY_LOADED on; subsequent loads should retry."""
         with tempfile.TemporaryDirectory() as tmpdir:
