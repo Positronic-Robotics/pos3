@@ -1394,6 +1394,25 @@ class TestProfileRegistry:
         assert profile.access_key == "AKIAEXAMPLE"
         assert profile.secret_key == "secret123"
 
+    def test_forced_reload_drops_stale_entries(self):
+        """force=True must replace the registry snapshot, not merge into it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_registry(
+                tmpdir,
+                '[profiles.alpha]\nendpoint = "https://a.example.com"\n'
+                '[profiles.beta]\nendpoint = "https://b.example.com"\n',
+            )
+            assert s3._resolve_profile("alpha").endpoint == "https://a.example.com"
+            assert s3._resolve_profile("beta").endpoint == "https://b.example.com"
+
+            # Rewrite the registry without 'beta' and force a reload.
+            self._write_registry(tmpdir, '[profiles.alpha]\nendpoint = "https://a2.example.com"\n')
+            s3.profiles._load_profile_registry(force=True)
+
+            assert s3._resolve_profile("alpha").endpoint == "https://a2.example.com"
+            with pytest.raises(ValueError, match="Unknown profile"):
+                s3._resolve_profile("beta")
+
     def test_credentials_file_missing_secret_raises(self):
         """A half-populated credentials file must fail loudly, not fall back to ambient creds."""
         with tempfile.TemporaryDirectory() as tmpdir:

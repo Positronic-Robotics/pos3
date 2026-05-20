@@ -192,7 +192,12 @@ def _load_profile_registry(path: Path | None = None, force: bool = False) -> Non
                 name: _profile_from_config(name, cfg, registry_path)
                 for name, cfg in data.get("profiles", {}).items()
             }
-            _REGISTRY_PROFILES.update(new_profiles)
+        else:
+            new_profiles = {}
+        # Replace, don't merge: a forced reload must reflect the file's current
+        # state, not accumulate stale entries from previous loads.
+        _REGISTRY_PROFILES.clear()
+        _REGISTRY_PROFILES.update(new_profiles)
         _REGISTRY_LOADED = True
 
 
