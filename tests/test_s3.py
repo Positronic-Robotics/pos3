@@ -1336,6 +1336,27 @@ class TestProfileRegistry:
 
         assert profile.endpoint == "https://from-code.example.com"
 
+    def test_credentials_file_relative_to_registry(self):
+        """A relative credentials_file path must resolve next to profiles.toml, not CWD."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "acme.creds").write_text(
+                "[acme]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = secret123\n"
+            )
+            # Bare filename — would fail against CWD, must resolve against the registry dir.
+            self._write_registry(
+                tmpdir,
+                '[profiles.acme]\nendpoint = "https://s.example.com"\ncredentials_file = "acme.creds"\n',
+            )
+            saved_cwd = os.getcwd()
+            try:
+                os.chdir(Path(tmpdir).parent)  # any dir that doesn't contain acme.creds
+                profile = s3._resolve_profile("acme")
+            finally:
+                os.chdir(saved_cwd)
+
+        assert profile.access_key == "AKIAEXAMPLE"
+        assert profile.secret_key == "secret123"
+
     def test_credentials_file_missing_secret_raises(self):
         """A half-populated credentials file must fail loudly, not fall back to ambient creds."""
         with tempfile.TemporaryDirectory() as tmpdir:

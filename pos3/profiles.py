@@ -131,7 +131,13 @@ def _profile_from_config(name: str, cfg: dict[str, Any], source: Path) -> Profil
     access_key = secret_key = session_token = None
     creds_file = cfg.get("credentials_file")
     if creds_file:
-        access_key, secret_key, session_token = _load_credentials_file(Path(creds_file).expanduser(), name)
+        # Resolve relative paths against the registry file's directory, not
+        # CWD, so a profiles.toml co-located with its .creds files works
+        # regardless of where pos3 is invoked from.
+        creds_path = Path(creds_file).expanduser()
+        if not creds_path.is_absolute():
+            creds_path = source.parent / creds_path
+        access_key, secret_key, session_token = _load_credentials_file(creds_path, name)
 
     return Profile(
         local_name=cfg.get("local_name", name),
