@@ -1277,6 +1277,14 @@ class TestUrlProfileParsing:
     def test_url_profile_non_s3(self):
         assert s3._url_profile("/local/path") is None
 
+    def test_empty_url_profile_selector_raises(self):
+        """An '@' with no profile name (e.g. from a template variable that expanded empty)
+        must fail loudly, not silently fall back to arg/default profile."""
+        with pytest.raises(ValueError, match="Empty profile selector"):
+            s3._url_profile("s3://@bucket/key")
+        with pytest.raises(ValueError, match="Empty profile selector"):
+            s3._url_profile("s3://:token@bucket/key")
+
     def test_parse_strips_userinfo(self):
         assert s3._parse_s3_url("s3://acme@bucket/path/to/data") == ("bucket", "path/to/data")
 

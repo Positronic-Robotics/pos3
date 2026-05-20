@@ -203,11 +203,21 @@ def _url_profile(s3_url: str) -> str | None:
     """Extract an explicit profile name from the userinfo slot of an S3 URL.
 
     `s3://<profile>@bucket/key` selects `<profile>`. No userinfo -> None.
+    An empty selector (`s3://@bucket/key`, `s3://:token@bucket/key`) is a
+    hard error: a templated CLI variable that expanded to nothing must not
+    silently fall back to the argument/default profile.
     """
     parsed = urlparse(s3_url)
     if parsed.scheme != "s3":
         return None
-    return parsed.username or None
+    if "@" not in parsed.netloc:
+        return None
+    if not parsed.username:
+        raise ValueError(
+            f"Empty profile selector in S3 URL: {s3_url!r}. "
+            "Use s3://<profile>@bucket/key or omit the '@'."
+        )
+    return parsed.username
 
 
 def _create_s3_client(profile: Profile | None = None):
