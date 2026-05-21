@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `pos3` console-script entry point with `ls`, `download`, `upload` subcommands
+  ([#10](https://github.com/Positronic-Robotics/pos3/issues/10)).
+  - `pos3 ls <prefix> [-r] [--profile NAME]` lists objects, one full `s3://` URL
+    per line on stdout.
+  - `pos3 download <url> [--local PATH] [--delete] [--exclude PATTERN]... [--profile NAME]`
+    prints only the resulting local path to stdout; progress and logs go to
+    stderr, so `data_dir=$(pos3 download s3://bucket/dataset/)` is safe.
+  - `pos3 upload <url> [--local PATH] [--delete] [--exclude PATTERN]... [--profile NAME]`
+    is one-shot (no background loop or interval). Source defaults to the cache
+    path `pos3 download` would have produced; errors if the source doesn't
+    exist.
+  - `--delete` defaults OFF for both `download` and `upload` (the Python API
+    defaults to `True`; the CLI is more conservative for interactive use).
+  - `--profile` is supported alongside the URL form `s3://<profile>@bucket/...`;
+    the URL form wins on conflict, matching the Python precedence.
+
 ## [0.3.0] - 2026-05-19
 
 ### Added

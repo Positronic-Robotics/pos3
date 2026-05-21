@@ -113,6 +113,39 @@ Lists files/objects in a directory or S3 prefix.
 
 **Returns**: List of full S3 URLs or local paths.
 
+## CLI
+
+`pos3` ships a small command-line interface for the most common one-shot
+operations. After `uv pip install pos3` (or `pip install pos3`), `pos3` is on
+your `$PATH`:
+
+```bash
+# List objects (one full s3:// URL per line on stdout)
+pos3 ls s3://bucket/dataset/
+pos3 ls -r s3://bucket/dataset/
+
+# Download an S3 prefix or object into the cache (or a custom --local path).
+# Only the resulting local path is written to stdout — progress and logs go
+# to stderr — so it's safe to capture in a shell variable:
+data_dir=$(pos3 download s3://bucket/dataset/)
+
+# One-shot upload. Source defaults to the same cache path `pos3 download`
+# would have produced; --local overrides. Errors if the source doesn't exist.
+pos3 upload s3://bucket/results/ --local ./out/
+```
+
+All three subcommands accept `--profile NAME`. The URL form
+`s3://<profile>@bucket/...` takes precedence over `--profile` on conflict
+(matching the Python API).
+
+`--delete` defaults to **OFF** for both `download` and `upload`, even though
+the Python API defaults to `True`. CLI defaults are conservative for
+interactive shell use; pass `--delete` explicitly to mirror file removals.
+
+The CLI is one-shot only — no background sync, no `pos3 sync` subcommand.
+Use the Python `pos3.mirror()` context manager when you need an interval-based
+loop or bi-directional sync over a job's lifetime.
+
 ## Comparison with Libraries
 
 Why use `pos3` instead of other Python libraries?
