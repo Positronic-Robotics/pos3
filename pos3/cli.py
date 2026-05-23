@@ -9,6 +9,10 @@ to OFF for both ``download`` and ``upload``, because the API's ``True``
 default is too destructive for interactive shell use. ``download`` writes
 only the resulting local path to stdout so the output is safe to capture in
 ``$(pos3 download ...)``; progress bars and logs go to stderr.
+
+``--dry-run`` / ``-n`` is accepted only on ``download`` and ``upload``: it
+prints the planned per-file actions to stdout in ``aws s3 sync --dryrun``
+style and performs no transfers, deletes, or directory creation.
 """
 
 from __future__ import annotations
@@ -17,7 +21,19 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import _is_s3_path, _require_active_mirror, download, ls, mirror, upload
+from . import (
+    _compute_sync_diff,
+    _filter_fileinfo,
+    _is_s3_path,
+    _make_s3_key,
+    _parse_s3_url,
+    _require_active_mirror,
+    _scan_local,
+    download,
+    ls,
+    mirror,
+    upload,
+)
 from .profiles import _resolve_profile, _url_profile
 
 
@@ -46,6 +62,12 @@ def _build_parser() -> argparse.ArgumentParser:
             default=None,
             help="Glob pattern to skip. May be passed multiple times.",
         )
+        p.add_argument(
+            "-n",
+            "--dry-run",
+            action="store_true",
+            help="Print the planned actions and exit without transferring or deleting anything.",
+        )
         add_profile(p)
 
     p_ls = subparsers.add_parser("ls", help="List objects under a prefix.")
@@ -72,6 +94,10 @@ def _cmd_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        with mirror(show_progress=False):
+            _print_download_plan(args)
+        return 0
     with mirror(show_progress=True):
         local_path = download(
             args.url,
@@ -84,25 +110,39 @@ def _cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_upload_source(args: argparse.Namespace) -> Path | None:
+    """Resolve the local source path, mirroring the precedence used by upload().
+
+    Prints an error and returns None if the source path does not exist.
+    """
+    mirror_obj = _require_active_mirror()
+    if args.local:
+        source = Path(args.local).expanduser().resolve()
+    else:
+        # Resolve the same profile precedence (URL > --profile > context default)
+        # the upload() call will use, so the cache path we check matches the one
+        # upload() would target.
+        profile: str | None = args.profile
+        if _is_s3_path(args.url):
+            url_profile = _url_profile(args.url)
+            if url_profile is not None:
+                profile = url_profile
+        effective_profile = _resolve_profile(profile) or mirror_obj.options.default_profile
+        source = mirror_obj.options.cache_path_for(args.url, effective_profile)
+    if not source.exists():
+        print(f"pos3 upload: source path does not exist: {source}", file=sys.stderr)
+        return None
+    return source
+
+
 def _cmd_upload(args: argparse.Namespace) -> int:
-    with mirror(show_progress=True):
-        mirror_obj = _require_active_mirror()
-        if args.local:
-            source = Path(args.local).expanduser().resolve()
-        else:
-            # Resolve the same profile precedence (URL > --profile > context default)
-            # the upload() call will use, so the cache path we check matches the one
-            # upload() would target.
-            profile: str | None = args.profile
-            if _is_s3_path(args.url):
-                url_profile = _url_profile(args.url)
-                if url_profile is not None:
-                    profile = url_profile
-            effective_profile = _resolve_profile(profile) or mirror_obj.options.default_profile
-            source = mirror_obj.options.cache_path_for(args.url, effective_profile)
-        if not source.exists():
-            print(f"pos3 upload: source path does not exist: {source}", file=sys.stderr)
+    with mirror(show_progress=not args.dry_run):
+        source = _resolve_upload_source(args)
+        if source is None:
             return 1
+        if args.dry_run:
+            _print_upload_plan(args, source)
+            return 0
         upload(
             args.url,
             local=source,
@@ -112,6 +152,60 @@ def _cmd_upload(args: argparse.Namespace) -> int:
             profile=args.profile,
         )
     return 0
+
+
+def _print_download_plan(args: argparse.Namespace) -> None:
+    if not _is_s3_path(args.url):
+        return  # download() on a local path is a no-op pass-through.
+    mirror_obj = _require_active_mirror()
+    profile = mirror_obj._effective_profile(args.profile, args.url)
+    local_path = (
+        mirror_obj.options.cache_path_for(args.url, profile)
+        if args.local is None
+        else Path(args.local).expanduser().resolve()
+    )
+    bucket, prefix = _parse_s3_url(args.url)
+    to_copy, to_delete = _compute_sync_diff(
+        _filter_fileinfo(mirror_obj._scan_s3(bucket, prefix, profile), args.exclude),
+        _filter_fileinfo(_scan_local(local_path), args.exclude),
+    )
+    # Skip synthesized directory entries: only file-level actions matter for the user.
+    for info in to_copy:
+        if info.is_dir:
+            continue
+        s3_key = _make_s3_key(prefix, info)
+        dst = local_path / info.relative_path if info.relative_path else local_path
+        print(f"download: s3://{bucket}/{s3_key} to {dst}")
+    if args.delete:
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            target = local_path / info.relative_path if info.relative_path else local_path
+            print(f"delete: {target}")
+
+
+def _print_upload_plan(args: argparse.Namespace, source: Path) -> None:
+    if not _is_s3_path(args.url):
+        return  # upload() on a local path is a no-op pass-through (it would mkdir).
+    mirror_obj = _require_active_mirror()
+    profile = mirror_obj._effective_profile(args.profile, args.url)
+    bucket, prefix = _parse_s3_url(args.url)
+    to_copy, to_delete = _compute_sync_diff(
+        _filter_fileinfo(_scan_local(source), args.exclude),
+        _filter_fileinfo(mirror_obj._scan_s3(bucket, prefix, profile), args.exclude),
+    )
+    for info in to_copy:
+        if info.is_dir:
+            continue
+        s3_key = _make_s3_key(prefix, info)
+        local = source / info.relative_path if info.relative_path else source
+        print(f"upload: {local} to s3://{bucket}/{s3_key}")
+    if args.delete:
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(prefix, info)
+            print(f"delete: s3://{bucket}/{s3_key}")
 
 
 _COMMANDS = {

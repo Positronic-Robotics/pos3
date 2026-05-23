@@ -18,6 +18,9 @@
     defaults to `True`; the CLI is more conservative for interactive use).
   - `--profile` is supported alongside the URL form `s3://<profile>@bucket/...`;
     the URL form wins on conflict, matching the Python precedence.
+  - `-n` / `--dry-run` on `download` and `upload` prints the planned per-file
+    actions to stdout (in `aws s3 sync --dryrun` style) and performs no
+    transfers, deletes, or directory creation.
 
 ## [0.3.0] - 2026-05-19
 

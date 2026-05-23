@@ -132,6 +132,10 @@ data_dir=$(pos3 download s3://bucket/dataset/)
 # One-shot upload. Source defaults to the same cache path `pos3 download`
 # would have produced; --local overrides. Errors if the source doesn't exist.
 pos3 upload s3://bucket/results/ --local ./out/
+
+# Preview what download/upload would do, without touching anything.
+pos3 download -n s3://bucket/dataset/ --local ./data/ --delete
+pos3 upload -n s3://bucket/results/ --local ./out/
 ```
 
 All three subcommands accept `--profile NAME`. The URL form
@@ -141,6 +145,10 @@ All three subcommands accept `--profile NAME`. The URL form
 `--delete` defaults to **OFF** for both `download` and `upload`, even though
 the Python API defaults to `True`. CLI defaults are conservative for
 interactive shell use; pass `--delete` explicitly to mirror file removals.
+
+`-n` / `--dry-run` is accepted on `download` and `upload` (not `ls`). It
+prints per-file plan lines to stdout in `aws s3 sync --dryrun` style and
+performs no transfers, deletes, or directory creation.
 
 The CLI is one-shot only — no background sync, no `pos3 sync` subcommand.
 Use the Python `pos3.mirror()` context manager when you need an interval-based

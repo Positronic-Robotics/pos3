@@ -255,6 +255,114 @@ class TestCliUpload:
         assert mock_s3.delete_object.call_count >= 1
 
 
+class TestCliDryRun:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_dry_run_prints_plan_and_does_not_transfer(self, mock_boto_client, capsys):
+        paginate = [
+            {
+                "Contents": [
+                    {"Key": "data/file.txt", "Size": 5},
+                    {"Key": "data/sub/nested.txt", "Size": 7},
+                ]
+            }
+        ]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            rc = main(["download", "-n", "s3://bucket/data", "--local", str(local_dir)])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        # No actual download was performed.
+        mock_s3.download_file.assert_not_called()
+        out_lines = captured.out.strip().splitlines()
+        # Two files planned, no extra trailing local-path line.
+        copy_lines = [line for line in out_lines if line.startswith("download:")]
+        assert len(copy_lines) == 2
+        assert any("s3://bucket/data/file.txt" in line for line in copy_lines)
+        assert any("s3://bucket/data/sub/nested.txt" in line for line in copy_lines)
+        assert all(" to " in line for line in copy_lines)
+        # No delete lines without --delete.
+        assert not any(line.startswith("delete:") for line in out_lines)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_dry_run_with_delete_emits_delete_lines(self, mock_boto_client, capsys):
+        paginate = [{"Contents": [{"Key": "data/keep.txt", "Size": 5}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "data"
+            local_dir.mkdir()
+            (local_dir / "keep.txt").write_bytes(b"12345")
+            orphan = local_dir / "orphan.txt"
+            orphan.write_text("orphan")
+
+            rc = main(
+                ["download", "-n", "s3://bucket/data", "--local", str(local_dir), "--delete"]
+            )
+
+            assert rc == 0
+            # Dry-run must not touch the filesystem.
+            assert orphan.exists()
+
+        captured = capsys.readouterr()
+        delete_lines = [
+            line for line in captured.out.splitlines() if line.startswith("delete:")
+        ]
+        assert any(str(orphan) in line for line in delete_lines)
+        mock_s3.download_file.assert_not_called()
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_dry_run_prints_plan_and_does_not_transfer(self, mock_boto_client, capsys):
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "src"
+            src.mkdir()
+            (src / "file.txt").write_text("content")
+
+            rc = main(["upload", "-n", "s3://bucket/data", "--local", str(src)])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        mock_s3.upload_file.assert_not_called()
+        upload_lines = [
+            line for line in captured.out.splitlines() if line.startswith("upload:")
+        ]
+        assert len(upload_lines) == 1
+        assert "s3://bucket/data/file.txt" in upload_lines[0]
+        assert str(src / "file.txt") in upload_lines[0]
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_dry_run_with_delete_emits_remote_delete_lines(self, mock_boto_client, capsys):
+        paginate = [{"Contents": [{"Key": "data/remote_only.txt", "Size": 5}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "src"
+            src.mkdir()
+            (src / "file.txt").write_text("content")
+
+            rc = main(
+                ["upload", "-n", "s3://bucket/data", "--local", str(src), "--delete"]
+            )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        mock_s3.upload_file.assert_not_called()
+        mock_s3.delete_object.assert_not_called()
+        delete_lines = [
+            line for line in captured.out.splitlines() if line.startswith("delete:")
+        ]
+        assert any("s3://bucket/data/remote_only.txt" in line for line in delete_lines)
+
+    def test_dry_run_not_accepted_on_ls(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["ls", "-n", "s3://bucket/data"])
+        assert exc.value.code != 0
+
+
 class TestCliEntry:
     def test_no_subcommand_exits_with_error(self, capsys):
         with pytest.raises(SystemExit) as exc:
