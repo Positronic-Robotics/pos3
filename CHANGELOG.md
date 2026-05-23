@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.1] - 2026-05-21
 
 ### Added
 - `pos3` console-script entry point with `ls`, `download`, `upload` subcommands
