@@ -24,13 +24,8 @@ from pathlib import Path
 
 from . import (
     TransferError,
-    _compute_sync_diff,
-    _filter_fileinfo,
     _is_s3_path,
-    _make_s3_key,
-    _parse_s3_url,
     _require_active_mirror,
-    _scan_local,
     download,
     ls,
     mirror,
@@ -166,53 +161,31 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _print_download_plan(args: argparse.Namespace) -> None:
-    mirror_obj = _require_active_mirror()
-    profile = mirror_obj._effective_profile(args.profile, args.url)
-    local_path = (
-        mirror_obj.options.cache_path_for(args.url, profile)
-        if args.local is None
-        else Path(args.local).expanduser().resolve()
+    plan = _require_active_mirror().plan_download(
+        args.url,
+        local=args.local,
+        exclude=args.exclude,
+        profile=args.profile,
     )
-    bucket, prefix = _parse_s3_url(args.url)
-    to_copy, to_delete = _compute_sync_diff(
-        _filter_fileinfo(mirror_obj._scan_s3(bucket, prefix, profile), args.exclude),
-        _filter_fileinfo(_scan_local(local_path), args.exclude),
-    )
-    # Skip synthesized directory entries: only file-level actions matter for the user.
-    for info in to_copy:
-        if info.is_dir:
-            continue
-        s3_key = _make_s3_key(prefix, info)
-        dst = local_path / info.relative_path if info.relative_path else local_path
-        print(f"download: s3://{bucket}/{s3_key} to {dst}")
+    for src, dst in plan.to_copy:
+        print(f"download: {src} to {dst}")
     if args.delete:
-        for info in to_delete:
-            if info.is_dir:
-                continue
-            target = local_path / info.relative_path if info.relative_path else local_path
+        for target in plan.to_delete:
             print(f"delete: {target}")
 
 
 def _print_upload_plan(args: argparse.Namespace, source: Path) -> None:
-    mirror_obj = _require_active_mirror()
-    profile = mirror_obj._effective_profile(args.profile, args.url)
-    bucket, prefix = _parse_s3_url(args.url)
-    to_copy, to_delete = _compute_sync_diff(
-        _filter_fileinfo(_scan_local(source), args.exclude),
-        _filter_fileinfo(mirror_obj._scan_s3(bucket, prefix, profile), args.exclude),
+    plan = _require_active_mirror().plan_upload(
+        args.url,
+        local=str(source),
+        exclude=args.exclude,
+        profile=args.profile,
     )
-    for info in to_copy:
-        if info.is_dir:
-            continue
-        s3_key = _make_s3_key(prefix, info)
-        local = source / info.relative_path if info.relative_path else source
-        print(f"upload: {local} to s3://{bucket}/{s3_key}")
+    for src, dst in plan.to_copy:
+        print(f"upload: {src} to {dst}")
     if args.delete:
-        for info in to_delete:
-            if info.is_dir:
-                continue
-            s3_key = _make_s3_key(prefix, info)
-            print(f"delete: s3://{bucket}/{s3_key}")
+        for target in plan.to_delete:
+            print(f"delete: {target}")
 
 
 _COMMANDS = {

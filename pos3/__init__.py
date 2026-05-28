@@ -93,7 +93,34 @@ class TransferError(Exception):
         self.failures = failures
 
 
+@dataclass(frozen=True)
+class TransferPlan:
+    """The set of operations a download/upload *would* perform, if executed.
+
+    Returned by :meth:`_Mirror.plan_download` and :meth:`_Mirror.plan_upload`.
+
+    ``to_copy`` is a list of ``(source, destination)`` pairs as strings —
+    each pair is one ``s3://bucket/key`` URL and one local filesystem path,
+    direction depending on whether the plan is for download or upload.
+    ``to_delete`` is a list of destination URLs / paths that ``delete=True``
+    on the corresponding call would remove. Directory-only entries from
+    the underlying scan are filtered out so the plan only reflects file
+    operations.
+    """
+
+    to_copy: list[tuple[str, str]]
+    to_delete: list[str]
+
+
 def _process_futures(futures, operation: str) -> None:
+    """Drain ``futures`` and raise :class:`TransferError` if any worker failed.
+
+    Drains all futures before raising, so a 1-of-N failure does not cancel
+    the rest of the batch (preserves best-effort completion). Callers that
+    need to keep going across failures wrap this in ``try / except`` — the
+    only such caller today is :meth:`_Mirror._background_worker`, which
+    treats interval syncs as retry-next-tick.
+    """
     failures: list[BaseException] = []
     for future in futures:
         try:
@@ -258,8 +285,11 @@ _GLOBAL_ACTIVE_MIRROR: _Mirror | None = None
 class _Mirror:
     def __init__(self, options: _Options):
         self.options = options
+        # cache_root is resolved eagerly but NOT created — the per-file
+        # workers (_put_locally) mkdir the leaf directory on demand. Keeping
+        # the constructor side-effect free lets dry-run / planning paths
+        # construct a Mirror without mutating the filesystem.
         self.cache_root = Path(self.options.cache_root).expanduser().resolve()
-        self.cache_root.mkdir(parents=True, exist_ok=True)
 
         self._default_profile = options.default_profile
         self._clients: dict[Profile | None, Any] = {}
@@ -455,6 +485,89 @@ class _Mirror:
 
         return local_path
 
+    def plan_download(
+        self,
+        remote: str,
+        local: str | Path | None = None,
+        exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
+    ) -> TransferPlan:
+        """Compute the :class:`TransferPlan` ``download()`` would execute.
+
+        Reads from S3 and the local filesystem but performs no transfers,
+        no deletes, and no directory creation. Raises ``ValueError`` if
+        ``remote`` is not an ``s3://`` URL.
+        """
+        if not _is_s3_path(remote):
+            raise ValueError(f"plan_download requires an s3:// URL, got: {remote}")
+        effective_profile = self._effective_profile(profile, remote)
+        local_path = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
+        bucket, prefix = _parse_s3_url(remote)
+        to_copy, to_delete = _compute_sync_diff(
+            _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
+            _filter_fileinfo(_scan_local(local_path), exclude),
+        )
+        copies: list[tuple[str, str]] = []
+        for info in to_copy:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(prefix, info)
+            dst = local_path / info.relative_path if info.relative_path else local_path
+            copies.append((f"s3://{bucket}/{s3_key}", str(dst)))
+        deletes: list[str] = []
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            target = local_path / info.relative_path if info.relative_path else local_path
+            deletes.append(str(target))
+        return TransferPlan(to_copy=copies, to_delete=deletes)
+
+    def plan_upload(
+        self,
+        remote: str,
+        local: str | Path | None = None,
+        exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
+    ) -> TransferPlan:
+        """Compute the :class:`TransferPlan` ``upload()`` would execute.
+
+        Reads from S3 and the local filesystem but performs no transfers,
+        no deletes, and no directory creation. Raises ``ValueError`` if
+        ``remote`` is not an ``s3://`` URL. A missing local source yields
+        an empty ``to_copy``.
+        """
+        if not _is_s3_path(remote):
+            raise ValueError(f"plan_upload requires an s3:// URL, got: {remote}")
+        effective_profile = self._effective_profile(profile, remote)
+        source = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
+        bucket, prefix = _parse_s3_url(remote)
+        to_copy, to_delete = _compute_sync_diff(
+            _filter_fileinfo(_scan_local(source), exclude),
+            _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
+        )
+        copies: list[tuple[str, str]] = []
+        for info in to_copy:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(prefix, info)
+            src = source / info.relative_path if info.relative_path else source
+            copies.append((str(src), f"s3://{bucket}/{s3_key}"))
+        deletes: list[str] = []
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(prefix, info)
+            deletes.append(f"s3://{bucket}/{s3_key}")
+        return TransferPlan(to_copy=copies, to_delete=deletes)
+
     def sync(
         self,
         remote: str,
@@ -559,8 +672,21 @@ class _Mirror:
         with self._lock:
             uploads = list(self._uploads.values())
         if had_error:
+            # The mirror() context is already unwinding with the caller's
+            # exception. If this cleanup sync also fails, swallow it so the
+            # original exception stays the visible cause — a TransferError
+            # from cleanup is logged but must not mask the failure that
+            # triggered cleanup. The clean-exit path (had_error=False)
+            # still propagates so the CLI exits non-zero on failure.
             uploads = [u for u in uploads if u.sync_on_error]
-        self._sync_uploads(uploads)
+            try:
+                self._sync_uploads(uploads)
+            except TransferError as exc:
+                logger.error(
+                    "Cleanup sync after error failed; original exception preserved: %s", exc
+                )
+        else:
+            self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
         tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []

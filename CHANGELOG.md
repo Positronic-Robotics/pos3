@@ -20,12 +20,16 @@
     the URL form wins on conflict, matching the Python precedence.
   - `-n` / `--dry-run` on `download` and `upload` prints the planned per-file
     actions to stdout (in `aws s3 sync --dryrun` style) and performs no
-    transfers and no deletes. (The cache root is still initialized as it is
-    for any `pos3` invocation.)
+    transfers, no deletes, and no directory creation.
   - `download` and `upload` require an `s3://` URL. The Python API's
     local-path passthrough still works in code; the CLI rejects non-S3
     inputs with a clear error so a typo can't silently succeed. `ls` is
     unchanged and still accepts both forms.
+- `pos3.TransferPlan` dataclass plus `Mirror.plan_download(remote, ...)` and
+  `Mirror.plan_upload(remote, ...)` methods: compute the set of
+  `(source, destination)` copies and target deletes a real call would
+  perform, without performing any of them. The CLI's `-n` / `--dry-run`
+  is implemented on top of these.
 
 ### Changed
 - Per-object transfer failures now raise `pos3.TransferError` instead of
@@ -39,7 +43,15 @@
   interval syncs** (`upload(..., interval=N)`) are best-effort: a
   `TransferError` from one tick is logged and the daemon continues so
   the next interval can retry. Only the final sync on context exit and
-  any one-shot call propagate.
+  any one-shot call propagate. **Cleanup on error** — when the
+  `mirror()` body is unwinding with an exception, a `TransferError` from
+  the `sync_on_error=True` cleanup sync is logged but swallowed, so the
+  original application exception remains the visible cause.
+- `pos3.mirror()` no longer creates the cache root directory eagerly on
+  context entry. The leaf directory is still created on demand when a
+  file is actually downloaded, so the visible behavior of `download()` is
+  unchanged. Dry-run and `plan_*` paths are now genuinely side-effect
+  free on the local filesystem.
 
 ## [0.3.0] - 2026-05-19
 
