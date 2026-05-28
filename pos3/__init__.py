@@ -506,19 +506,24 @@ class _Mirror:
             if local is None
             else Path(local).expanduser().resolve()
         )
-        # Normalize before parsing so a trailing slash on the input URL does
-        # not double up in the reconstructed S3 keys — keeps plan output
-        # byte-identical with what a real download() would actually transfer.
-        bucket, prefix = _parse_s3_url(_normalize_s3_url(remote))
+        # Two prefixes on purpose: the raw one preserves the user's
+        # trailing-slash intent so _list_s3_objects skips its exact-key
+        # head_object probe (matters when both `data` and `data/...` exist);
+        # the normalized one feeds _make_s3_key so reconstructed output keys
+        # don't get a double slash. _scan_s3 strips len(scan_prefix) then
+        # lstrip("/"), so the same FileInfo.relative_path drops out either
+        # way.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
         to_copy, to_delete = _compute_sync_diff(
-            _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
             _filter_fileinfo(_scan_local(local_path), exclude),
         )
         copies: list[tuple[str, str]] = []
         for info in to_copy:
             if info.is_dir:
                 continue
-            s3_key = _make_s3_key(prefix, info)
+            s3_key = _make_s3_key(out_prefix, info)
             dst = local_path / info.relative_path if info.relative_path else local_path
             copies.append((f"s3://{bucket}/{s3_key}", str(dst)))
         deletes: list[str] = []
@@ -551,25 +556,27 @@ class _Mirror:
             if local is None
             else Path(local).expanduser().resolve()
         )
-        # Normalize before parsing so a trailing slash on the input URL does
-        # not double up in the reconstructed S3 keys.
-        bucket, prefix = _parse_s3_url(_normalize_s3_url(remote))
+        # Two prefixes on purpose — see plan_download for the rationale. The
+        # raw prefix preserves trailing-slash intent for the S3 scan; the
+        # normalized one builds collision-free output keys.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
         to_copy, to_delete = _compute_sync_diff(
             _filter_fileinfo(_scan_local(source), exclude),
-            _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
         )
         copies: list[tuple[str, str]] = []
         for info in to_copy:
             if info.is_dir:
                 continue
-            s3_key = _make_s3_key(prefix, info)
+            s3_key = _make_s3_key(out_prefix, info)
             src = source / info.relative_path if info.relative_path else source
             copies.append((str(src), f"s3://{bucket}/{s3_key}"))
         deletes: list[str] = []
         for info in to_delete:
             if info.is_dir:
                 continue
-            s3_key = _make_s3_key(prefix, info)
+            s3_key = _make_s3_key(out_prefix, info)
             deletes.append(f"s3://{bucket}/{s3_key}")
         return TransferPlan(to_copy=copies, to_delete=deletes)
 

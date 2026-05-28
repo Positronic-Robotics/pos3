@@ -829,6 +829,32 @@ class TestPlan:
         assert all("//" not in src.replace("s3://", "") for src in sources)
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_trailing_slash_forces_directory_listing(self, mock_boto_client):
+        """`pos3 download -n s3://bucket/data/` must plan the directory
+        contents even if an exact object `data` also exists. Pre-fix,
+        plan_download normalized away the slash, head_object('data') won,
+        and the plan reported the exact-object copy instead of `data/*`."""
+        mock_s3 = _setup_s3_mock(
+            mock_boto_client,
+            [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}],
+        )
+        # Exact 'data' object ALSO exists — without preserving the slash,
+        # head_object('data') would win and shadow the directory contents.
+        mock_s3.head_object.side_effect = None
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data/", local=str(Path(tmpdir) / "dst")
+                )
+
+        sources = [src for src, _ in plan.to_copy]
+        assert sources == ["s3://bucket/data/file.txt"]
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_plan_upload_normalizes_trailing_slash_in_url(self, mock_boto_client):
         paginate = [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}]
         _setup_s3_mock(mock_boto_client, paginate)
