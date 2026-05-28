@@ -600,8 +600,15 @@ class _Mirror:
         effective_profile = self._effective_profile(profile, prefix)
 
         if _is_s3_path(prefix):
-            normalized = _normalize_s3_url(prefix)
-            bucket, key = _parse_s3_url(normalized)
+            # Use _parse_s3_url directly, NOT _normalize_s3_url: the latter
+            # strips trailing slashes, but `s3://bucket/data/` vs
+            # `s3://bucket/data` carries user intent here — the trailing
+            # slash means "treat as a directory prefix". _list_s3_objects
+            # respects that ("if key and not key.endswith('/')") so we
+            # preserve it. Otherwise a key collision (an exact object named
+            # `data` plus a `data/` directory) would silently hide the
+            # directory contents.
+            bucket, key = _parse_s3_url(prefix)
             # Don't force a trailing "/" here. _list_s3_objects probes the
             # key as an exact object first (via head_object) and only falls
             # back to directory listing with a trailing "/" on 404. Forcing

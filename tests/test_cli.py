@@ -69,6 +69,30 @@ class TestCliLs:
         assert str(base / "file.txt") in captured.out
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_ls_trailing_slash_forces_directory_listing(self, mock_boto_client, capsys):
+        """`pos3 ls s3://bucket/data/` must list the data/ contents even if
+        an object exactly named 'data' also exists. ls() used to strip the
+        trailing slash via _normalize_s3_url, letting head_object('data')
+        win and hide the directory contents."""
+        mock_s3 = _setup_s3_mock(
+            mock_boto_client,
+            [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}],
+        )
+        # Pretend an object exactly named 'data' ALSO exists — without the
+        # fix, head_object('data') would return this and the directory
+        # listing would be skipped.
+        mock_s3.head_object.side_effect = None
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+
+        rc = main(["ls", "s3://bucket/data/"])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        lines = captured.out.strip().splitlines()
+        # Should be the directory contents, not the exact-key 'data' object.
+        assert lines == ["s3://bucket/data/file.txt"]
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_ls_single_object(self, mock_boto_client, capsys):
         """`pos3 ls s3://bucket/file.json` on an exact object key must return
         the object URL, not an empty list. ls() used to force a trailing
