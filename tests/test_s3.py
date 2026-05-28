@@ -851,6 +851,34 @@ class TestPlan:
         assert plan.to_delete == ["s3://bucket/data/orphan.txt"]
 
 
+class TestSingleObjectDownload:
+    """Downloading an exact S3 object key (not a prefix) must actually fetch
+    the file. _scan_s3 used to emit a root directory marker that collided
+    with the file in _compute_sync_diff's dict, causing download() to mkdir
+    the local path instead of calling download_file."""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_single_object_calls_download_file(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # head_object 200 → _list_s3_objects yields the exact object.
+        mock_s3.head_object.return_value = {"ContentLength": 42, "Size": 42}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"Contents": []}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = Path(tmpdir) / "results.json"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/results.json", local=str(local))
+
+        assert mock_s3.download_file.call_count == 1
+        args = mock_s3.download_file.call_args[0]
+        assert args[0] == "bucket"
+        assert args[1] == "results.json"
+        assert args[2] == str(local)
+
+
 class TestMirrorConstructorIsSideEffectFree:
     def test_constructing_mirror_does_not_create_cache_root(self):
         """Constructing a Mirror (entering pos3.mirror()) must not mkdir the

@@ -171,6 +171,23 @@ class TestCliDownload:
         assert "file.txt" in downloaded_key
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_download_single_object_calls_download_file(self, mock_boto_client, capsys, tmp_path):
+        """`pos3 download s3://bucket/results.json` must actually fetch the
+        object, not silently mkdir the destination and exit 0."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+        mock_s3.head_object.side_effect = None
+        mock_s3.head_object.return_value = {"ContentLength": 42, "Size": 42}
+
+        local = tmp_path / "results.json"
+        rc = main(["download", "s3://bucket/results.json", "--local", str(local)])
+
+        assert rc == 0
+        assert mock_s3.download_file.call_count == 1
+        # Stdout still emits the local path on success.
+        captured = capsys.readouterr()
+        assert captured.out.strip() == str(local)
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_download_unknown_profile_returns_error(self, mock_boto_client, capsys):
         _setup_s3_mock(mock_boto_client)
 

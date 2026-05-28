@@ -859,6 +859,13 @@ class _Mirror:
         logger.debug("Scanning S3: s3://%s/%s", bucket, prefix)
         seen_dirs: set[str] = set()
         has_content = False
+        # When the prefix matches an exact object (head_object hit in
+        # _list_s3_objects), we emit a file FileInfo with relative_path="".
+        # In that case the root-dir marker below would collide with it in
+        # _compute_sync_diff's dict-by-relative_path and silently win,
+        # causing download() to mkdir the local path instead of fetching
+        # the object. Track this to suppress the redundant marker.
+        has_root_file = False
 
         for obj in self._list_s3_objects(bucket, prefix, profile):
             has_content = True
@@ -871,6 +878,8 @@ class _Mirror:
                     yield FileInfo(relative_path=relative, size=0, is_dir=True)
                     seen_dirs.add(relative)
             else:
+                if relative == "":
+                    has_root_file = True
                 yield FileInfo(relative_path=relative, size=obj["Size"], is_dir=False)
 
                 if "/" in relative:
@@ -881,7 +890,7 @@ class _Mirror:
                             yield FileInfo(relative_path=dir_path, size=0, is_dir=True)
                             seen_dirs.add(dir_path)
 
-        if has_content:
+        if has_content and not has_root_file:
             yield FileInfo(
                 relative_path="", size=0, is_dir=True
             )  # Yield root directory marker for symmetry with _scan_local
