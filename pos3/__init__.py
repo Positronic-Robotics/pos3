@@ -602,21 +602,31 @@ class _Mirror:
         if _is_s3_path(prefix):
             normalized = _normalize_s3_url(prefix)
             bucket, key = _parse_s3_url(normalized)
-            # Ensure directory-like listing by appending '/' to avoid spurious prefix matches
-            if key:
-                key = key + "/"
+            # Don't force a trailing "/" here. _list_s3_objects probes the
+            # key as an exact object first (via head_object) and only falls
+            # back to directory listing with a trailing "/" on 404. Forcing
+            # the slash here suppresses the exact-key probe, so
+            # `pos3 ls s3://bucket/results.json` would return nothing for an
+            # existing object. The "droid/recovery" vs "droid/recovery_towels"
+            # spurious-prefix case is already covered there.
             items = []
             for info in self._scan_s3(bucket, key, effective_profile):
-                if info.relative_path:
-                    # Skip nested items if not recursive
-                    if not recursive and "/" in info.relative_path:
-                        continue
-                    # Reconstruct the full S3 key
-                    if key:
-                        s3_key = key.rstrip("/") + "/" + info.relative_path
-                    else:
-                        s3_key = info.relative_path
-                    items.append(f"s3://{bucket}/{s3_key}")
+                if not info.relative_path:
+                    # Empty relative_path means either the root directory
+                    # marker (skip) or that ``key`` was the exact object key
+                    # — yield the input URL as a single-line result.
+                    if not info.is_dir:
+                        items.append(f"s3://{bucket}/{key}")
+                    continue
+                # Skip nested items if not recursive
+                if not recursive and "/" in info.relative_path:
+                    continue
+                # Reconstruct the full S3 key
+                if key:
+                    s3_key = key.rstrip("/") + "/" + info.relative_path
+                else:
+                    s3_key = info.relative_path
+                items.append(f"s3://{bucket}/{s3_key}")
             return items
         else:
             display_path = Path(prefix).expanduser()

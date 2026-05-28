@@ -68,6 +68,22 @@ class TestCliLs:
         assert rc == 0
         assert str(base / "file.txt") in captured.out
 
+    @patch(BOTO3_PATCH_TARGET)
+    def test_ls_single_object(self, mock_boto_client, capsys):
+        """`pos3 ls s3://bucket/file.json` on an exact object key must return
+        the object URL, not an empty list. ls() used to force a trailing
+        slash, suppressing the head_object exact-key probe."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+        # Override the default 404: this key IS an exact S3 object.
+        mock_s3.head_object.side_effect = None
+        mock_s3.head_object.return_value = {"ContentLength": 42}
+
+        rc = main(["ls", "s3://bucket/results.json"])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.out.strip() == "s3://bucket/results.json"
+
 
 class TestCliDownload:
     @patch(BOTO3_PATCH_TARGET)
