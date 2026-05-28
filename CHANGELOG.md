@@ -35,7 +35,11 @@
   to a partial cache, and `pos3 download` exited 0 after a failed S3 GET.
   Both now propagate. The new exception exposes `.operation` and
   `.failures` (list of the underlying per-worker exceptions). The CLI
-  catches it and exits 1 with the failure on stderr.
+  catches it and exits 1 with the failure on stderr. **Background
+  interval syncs** (`upload(..., interval=N)`) are best-effort: a
+  `TransferError` from one tick is logged and the daemon continues so
+  the next interval can retry. Only the final sync on context exit and
+  any one-shot call propagate.
 
 ## [0.3.0] - 2026-05-19
 

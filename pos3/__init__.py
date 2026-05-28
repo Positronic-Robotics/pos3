@@ -546,7 +546,14 @@ class _Mirror:
                         registration.last_sync = now
                         due.append(registration)
 
-            self._sync_uploads(due)
+            try:
+                self._sync_uploads(due)
+            except Exception as exc:
+                # Background interval syncs are best-effort: a TransferError
+                # (or anything else) here must not kill the daemon thread —
+                # the next tick will retry. _final_sync still propagates on
+                # context exit so one-shot callers see definitive failures.
+                logger.error("Background sync iteration failed: %s", exc)
 
     def _final_sync(self, had_error: bool = False) -> None:
         with self._lock:

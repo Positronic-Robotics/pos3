@@ -244,6 +244,35 @@ class TestUpload:
         assert mock_s3.upload_file.call_count >= 2
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_background_worker_survives_transfer_error(self, mock_boto_client):
+        """A TransferError from one interval-sync iteration must not kill the
+        daemon thread; subsequent ticks should keep retrying."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        call_count = {"n": 0}
+
+        def upload_side_effect(*_args, **_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("transient")
+            # Subsequent calls succeed (no return value needed).
+
+        mock_s3.upload_file.side_effect = upload_side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload("s3://bucket/output", local=output, interval=1)
+                time.sleep(2.5)
+
+        # If the worker had died after the first failure, count would stay at 1.
+        # Surviving means at least one more attempt happened on a later tick.
+        assert call_count["n"] >= 2
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_upload_no_sync_on_error(self, mock_boto_client):
         """Test that uploads with sync_on_error=False don't sync when context exits with error."""
         mock_s3 = _setup_s3_mock(mock_boto_client)
