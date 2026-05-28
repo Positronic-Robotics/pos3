@@ -27,6 +27,16 @@
     inputs with a clear error so a typo can't silently succeed. `ls` is
     unchanged and still accepts both forms.
 
+### Changed
+- Per-object transfer failures now raise `pos3.TransferError` instead of
+  being logged and swallowed. Previously, if any worker in a download or
+  upload batch failed, the error was sent to the logger and the call
+  returned normally — `data_dir = pos3.download(...)` could return a path
+  to a partial cache, and `pos3 download` exited 0 after a failed S3 GET.
+  Both now propagate. The new exception exposes `.operation` and
+  `.failures` (list of the underlying per-worker exceptions). The CLI
+  catches it and exits 1 with the failure on stderr.
+
 ## [0.3.0] - 2026-05-19
 
 ### Added

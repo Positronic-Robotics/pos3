@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from . import (
+    TransferError,
     _compute_sync_diff,
     _filter_fileinfo,
     _is_s3_path,
@@ -226,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return _COMMANDS[args.command](args)
-    except ValueError as exc:
+    except (ValueError, TransferError) as exc:
         print(f"pos3 {args.command}: {exc}", file=sys.stderr)
         return 1
 

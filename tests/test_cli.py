@@ -286,6 +286,42 @@ class TestCliUpload:
         assert mock_s3.delete_object.call_count >= 1
 
 
+class TestCliTransferFailures:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_returns_nonzero_when_worker_fails(self, mock_boto_client, capsys, tmp_path):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+        mock_s3.download_file.side_effect = RuntimeError("boom")
+
+        local_dir = tmp_path / "dst"
+        rc = main(["download", "s3://bucket/data", "--local", str(local_dir)])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        # The success-path stdout (the local cache path) MUST NOT be printed
+        # on failure, since `data_dir=$(pos3 download …)` would treat the
+        # path as valid and downstream reads would silently use a partial cache.
+        assert captured.out == ""
+        assert "Download" in captured.err
+        assert "boom" in captured.err
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_returns_nonzero_when_worker_fails(self, mock_boto_client, capsys, tmp_path):
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+        mock_s3.upload_file.side_effect = RuntimeError("boom")
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "file.txt").write_text("content")
+
+        rc = main(["upload", "s3://bucket/data", "--local", str(src)])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "Upload" in captured.err
+        assert "boom" in captured.err
+
+
 class TestCliDryRun:
     @patch(BOTO3_PATCH_TARGET)
     def test_download_dry_run_prints_plan_and_does_not_transfer(self, mock_boto_client, capsys):

@@ -80,12 +80,29 @@ def _make_s3_key(prefix: str, info: FileInfo) -> str:
     return key
 
 
+class TransferError(Exception):
+    """Raised when one or more S3 transfer or delete workers failed.
+
+    ``failures`` carries the per-worker exceptions; the message names the
+    operation (Download / Upload / Delete) and the failure count.
+    """
+
+    def __init__(self, operation: str, failures: list[BaseException]):
+        super().__init__(f"{operation}: {len(failures)} worker(s) failed: {failures[0]}")
+        self.operation = operation
+        self.failures = failures
+
+
 def _process_futures(futures, operation: str) -> None:
+    failures: list[BaseException] = []
     for future in futures:
         try:
             future.result()
         except Exception as exc:
             logger.error("%s failed: %s", operation, exc)
+            failures.append(exc)
+    if failures:
+        raise TransferError(operation, failures)
 
 
 @dataclass(frozen=True)
@@ -318,6 +335,7 @@ class _Mirror:
         Raises:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
+            TransferError: If any object failed to download (was previously logged and swallowed).
         """
         effective_profile = self._effective_profile(profile, remote)
 
@@ -394,6 +412,8 @@ class _Mirror:
 
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
+            TransferError: Raised from the mirror context exit (or background sync) if any object failed to upload
+                or delete (was previously logged and swallowed).
         """
         effective_profile = self._effective_profile(profile, remote)
 
