@@ -20,7 +20,12 @@
     the URL form wins on conflict, matching the Python precedence.
   - `-n` / `--dry-run` on `download` and `upload` prints the planned per-file
     actions to stdout (in `aws s3 sync --dryrun` style) and performs no
-    transfers, deletes, or directory creation.
+    transfers and no deletes. (The cache root is still initialized as it is
+    for any `pos3` invocation.)
+  - `download` and `upload` require an `s3://` URL. The Python API's
+    local-path passthrough still works in code; the CLI rejects non-S3
+    inputs with a clear error so a typo can't silently succeed. `ls` is
+    unchanged and still accepts both forms.
 
 ## [0.3.0] - 2026-05-19
 

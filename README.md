@@ -148,7 +148,12 @@ interactive shell use; pass `--delete` explicitly to mirror file removals.
 
 `-n` / `--dry-run` is accepted on `download` and `upload` (not `ls`). It
 prints per-file plan lines to stdout in `aws s3 sync --dryrun` style and
-performs no transfers, deletes, or directory creation.
+performs no transfers and no deletes. (The cache root directory is
+initialized the same way it is for any `pos3` invocation.)
+
+`download` and `upload` require an `s3://` URL; non-S3 inputs are rejected
+with a non-zero exit. `ls` still accepts both `s3://` prefixes and local
+paths, matching the Python API.
 
 The CLI is one-shot only — no background sync, no `pos3 sync` subcommand.
 Use the Python `pos3.mirror()` context manager when you need an interval-based

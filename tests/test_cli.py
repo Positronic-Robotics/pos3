@@ -165,6 +165,37 @@ class TestCliDownload:
         assert "Unknown profile" in captured.err
 
 
+class TestCliUrlValidation:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_rejects_non_s3_url(self, mock_boto_client, capsys):
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        rc = main(["download", "bucket/data", "--local", "/tmp/ignored"])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "must be an s3:// URL" in captured.err
+        # Nothing should have happened on stdout, nothing on the wire.
+        assert captured.out == ""
+        mock_s3.download_file.assert_not_called()
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_rejects_non_s3_url(self, mock_boto_client, capsys, tmp_path):
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "file.txt").write_text("x")
+
+        rc = main(["upload", str(tmp_path / "dst"), "--local", str(src)])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "must be an s3:// URL" in captured.err
+        mock_s3.upload_file.assert_not_called()
+        # The bogus "destination" must not have been mkdir'd as a side effect.
+        assert not (tmp_path / "dst").exists()
+
+
 class TestCliUpload:
     @patch(BOTO3_PATCH_TARGET)
     def test_upload_errors_when_source_missing(self, mock_boto_client, capsys):

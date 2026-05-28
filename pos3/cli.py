@@ -10,9 +10,10 @@ default is too destructive for interactive shell use. ``download`` writes
 only the resulting local path to stdout so the output is safe to capture in
 ``$(pos3 download ...)``; progress bars and logs go to stderr.
 
-``--dry-run`` / ``-n`` is accepted only on ``download`` and ``upload``: it
-prints the planned per-file actions to stdout in ``aws s3 sync --dryrun``
-style and performs no transfers, deletes, or directory creation.
+``--dry-run`` / ``-n`` (download and upload only) prints the planned
+per-file actions to stdout in ``aws s3 sync --dryrun`` style and performs
+no transfers and no deletes. (The cache root directory is initialized the
+same way it is for any pos3 invocation.)
 """
 
 from __future__ import annotations
@@ -94,6 +95,12 @@ def _cmd_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
+    if not _is_s3_path(args.url):
+        print(
+            f"pos3 download: url must be an s3:// URL, got: {args.url}",
+            file=sys.stderr,
+        )
+        return 1
     if args.dry_run:
         with mirror(show_progress=False):
             _print_download_plan(args)
@@ -122,11 +129,8 @@ def _resolve_upload_source(args: argparse.Namespace) -> Path | None:
         # Resolve the same profile precedence (URL > --profile > context default)
         # the upload() call will use, so the cache path we check matches the one
         # upload() would target.
-        profile: str | None = args.profile
-        if _is_s3_path(args.url):
-            url_profile = _url_profile(args.url)
-            if url_profile is not None:
-                profile = url_profile
+        url_profile = _url_profile(args.url)
+        profile = url_profile if url_profile is not None else args.profile
         effective_profile = _resolve_profile(profile) or mirror_obj.options.default_profile
         source = mirror_obj.options.cache_path_for(args.url, effective_profile)
     if not source.exists():
@@ -136,6 +140,12 @@ def _resolve_upload_source(args: argparse.Namespace) -> Path | None:
 
 
 def _cmd_upload(args: argparse.Namespace) -> int:
+    if not _is_s3_path(args.url):
+        print(
+            f"pos3 upload: url must be an s3:// URL, got: {args.url}",
+            file=sys.stderr,
+        )
+        return 1
     with mirror(show_progress=not args.dry_run):
         source = _resolve_upload_source(args)
         if source is None:
@@ -155,8 +165,6 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _print_download_plan(args: argparse.Namespace) -> None:
-    if not _is_s3_path(args.url):
-        return  # download() on a local path is a no-op pass-through.
     mirror_obj = _require_active_mirror()
     profile = mirror_obj._effective_profile(args.profile, args.url)
     local_path = (
@@ -185,8 +193,6 @@ def _print_download_plan(args: argparse.Namespace) -> None:
 
 
 def _print_upload_plan(args: argparse.Namespace, source: Path) -> None:
-    if not _is_s3_path(args.url):
-        return  # upload() on a local path is a no-op pass-through (it would mkdir).
     mirror_obj = _require_active_mirror()
     profile = mirror_obj._effective_profile(args.profile, args.url)
     bucket, prefix = _parse_s3_url(args.url)
