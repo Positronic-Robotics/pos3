@@ -808,6 +808,48 @@ class TestPlan:
                 with pytest.raises(ValueError, match="s3:// URL"):
                     _require_active_mirror().plan_upload("/local/path", local=tmpdir)
 
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_normalizes_trailing_slash_in_url(self, mock_boto_client):
+        """A trailing slash on the input URL must not produce s3://bucket/data//file.txt
+        in the plan — Mirror.download normalizes before parsing and plan_* must agree."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data/", local=str(local_dir)
+                )
+
+        sources = [src for src, _ in plan.to_copy]
+        assert sources == ["s3://bucket/data/file.txt"]
+        assert all("//" not in src.replace("s3://", "") for src in sources)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_normalizes_trailing_slash_in_url(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "src"
+            src.mkdir()
+            (src / "file.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_upload(
+                    "s3://bucket/data/", local=str(src)
+                )
+
+        destinations = [dst for _, dst in plan.to_copy]
+        assert destinations == ["s3://bucket/data/file.txt"]
+        # And the delete list, which also goes through _make_s3_key for upload.
+        assert plan.to_delete == ["s3://bucket/data/orphan.txt"]
+
 
 class TestMirrorConstructorIsSideEffectFree:
     def test_constructing_mirror_does_not_create_cache_root(self):

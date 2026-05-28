@@ -506,7 +506,10 @@ class _Mirror:
             if local is None
             else Path(local).expanduser().resolve()
         )
-        bucket, prefix = _parse_s3_url(remote)
+        # Normalize before parsing so a trailing slash on the input URL does
+        # not double up in the reconstructed S3 keys — keeps plan output
+        # byte-identical with what a real download() would actually transfer.
+        bucket, prefix = _parse_s3_url(_normalize_s3_url(remote))
         to_copy, to_delete = _compute_sync_diff(
             _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
             _filter_fileinfo(_scan_local(local_path), exclude),
@@ -548,7 +551,9 @@ class _Mirror:
             if local is None
             else Path(local).expanduser().resolve()
         )
-        bucket, prefix = _parse_s3_url(remote)
+        # Normalize before parsing so a trailing slash on the input URL does
+        # not double up in the reconstructed S3 keys.
+        bucket, prefix = _parse_s3_url(_normalize_s3_url(remote))
         to_copy, to_delete = _compute_sync_diff(
             _filter_fileinfo(_scan_local(source), exclude),
             _filter_fileinfo(self._scan_s3(bucket, prefix, effective_profile), exclude),
