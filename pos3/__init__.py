@@ -254,7 +254,7 @@ class _DownloadRegistration:
 
 @dataclass
 class _UploadRegistration:
-    remote: str
+    remote: str  # normalized form — used as the registration / dedup key
     local_path: Path
     interval: int | None
     delete: bool
@@ -262,6 +262,11 @@ class _UploadRegistration:
     exclude: list[str] | None
     profile: Profile | None = None
     last_sync: float = 0.0
+    # The user's original URL, preserving trailing-slash intent. _sync_uploads
+    # parses it raw so `s3://bucket/data/` skips head_object('data') in
+    # _list_s3_objects and scans the directory as the user meant. NOT
+    # compared in __eq__ — only the normalized form determines identity.
+    raw_remote: str = ""
 
     def __eq__(self, other):
         if not isinstance(other, _UploadRegistration):
@@ -399,7 +404,9 @@ class _Mirror:
 
         if need_download:
             try:
-                self._perform_download(normalized, local_path, delete, exclude, effective_profile)
+                # Pass the raw URL — _perform_download preserves trailing
+                # slashes for scanning while normalizing for output keys.
+                self._perform_download(remote, local_path, delete, exclude, effective_profile)
             except Exception as exc:
                 registration.error = exc
                 registration.ready.set()
@@ -468,6 +475,7 @@ class _Mirror:
             exclude=exclude,
             profile=effective_profile,
             last_sync=0,
+            raw_remote=remote,
         )
 
         with self._lock:
@@ -556,6 +564,14 @@ class _Mirror:
             if local is None
             else Path(local).expanduser().resolve()
         )
+        # Mirror real upload() behavior: _sync_uploads skips any registration
+        # whose local_path does not exist (does nothing — not even deletes).
+        # Without this short-circuit, _scan_local yields nothing while
+        # _scan_s3 yields remote objects, so _compute_sync_diff would
+        # falsely report every remote object as "would delete" — a plan the
+        # real call would never execute.
+        if not source.exists():
+            return TransferPlan(to_copy=[], to_delete=[])
         # Two prefixes on purpose — see plan_download for the rationale. The
         # raw prefix preserves trailing-slash intent for the S3 scan; the
         # normalized one builds collision-free output keys.
@@ -723,7 +739,11 @@ class _Mirror:
             if registration.local_path.exists():
                 tasks.append(
                     (
-                        registration.remote,
+                        # raw_remote preserves the user's trailing slash so
+                        # _list_s3_objects skips its exact-key head_object
+                        # probe; out-key building below normalizes to avoid
+                        # double slashes.
+                        registration.raw_remote or registration.remote,
                         registration.local_path,
                         registration.delete,
                         registration.exclude,
@@ -740,19 +760,20 @@ class _Mirror:
 
         for remote, local_path, delete, exclude, profile in tasks:
             logger.debug("Syncing upload: %s from %s (delete=%s)", remote, local_path, delete)
-            bucket, prefix = _parse_s3_url(remote)
+            scan_bucket, scan_prefix = _parse_s3_url(remote)
+            bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
             to_copy, to_delete = _compute_sync_diff(
                 _filter_fileinfo(_scan_local(local_path), exclude),
-                _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
+                _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
             )
 
             for info in to_copy:
-                s3_key = _make_s3_key(prefix, info)
+                s3_key = _make_s3_key(out_prefix, info)
                 to_put.append((info, local_path, bucket, s3_key, profile))
                 total_bytes += info.size
 
             for info in to_delete if delete else []:
-                s3_key = _make_s3_key(prefix, info)
+                s3_key = _make_s3_key(out_prefix, info)
                 to_remove.append((bucket, s3_key, profile))
 
         if to_put:
@@ -790,16 +811,21 @@ class _Mirror:
         exclude: list[str] | None,
         profile: Profile | None = None,
     ) -> None:
-        bucket, prefix = _parse_s3_url(remote)
+        # Dual-prefix: raw remote preserves the user's trailing slash so
+        # _list_s3_objects skips its exact-key head_object probe (matters
+        # when both `data` and `data/` exist); normalized remote feeds
+        # _make_s3_key so output keys don't get double slashes.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
         logger.debug(
             "Performing download: s3://%s/%s to %s (delete=%s)",
-            bucket,
-            prefix,
+            scan_bucket,
+            scan_prefix,
             local_path,
             delete,
         )
         to_copy, to_delete = _compute_sync_diff(
-            _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
             _filter_fileinfo(_scan_local(local_path), exclude),
         )
 
@@ -808,7 +834,7 @@ class _Mirror:
         total_bytes = 0
 
         for info in to_copy:
-            s3_key = _make_s3_key(prefix, info)
+            s3_key = _make_s3_key(out_prefix, info)
             to_put.append((info, bucket, s3_key, local_path))
             total_bytes += info.size
 

@@ -877,6 +877,89 @@ class TestPlan:
         assert plan.to_delete == ["s3://bucket/data/orphan.txt"]
 
 
+class TestTrailingSlashRealTransfers:
+    """The real (non-dry-run) download() and upload() paths must preserve
+    the user's trailing-slash intent. Mirror.download / _sync_uploads used
+    to normalize the URL before scanning, letting head_object('data') win
+    over the requested data/ directory listing."""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_trailing_slash_transfers_directory_contents(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # Both: an exact 'data' object AND objects under 'data/' exist.
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "data/file.txt", "Size": 5}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/data/", local=str(local), delete=False)
+
+        # The directory content must be the one downloaded, not the exact
+        # 'data' object that head_object would have picked up.
+        keys = [c[0][1] for c in mock_s3.download_file.call_args_list]
+        assert keys == ["data/file.txt"]
+        assert "data" not in keys
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_trailing_slash_scans_directory_for_delete(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # Exact 'data' object AND an orphan under 'data/' both exist.
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "src"
+            source.mkdir()
+            (source / "file.txt").write_text("x")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload(
+                    "s3://bucket/data/",
+                    local=str(source),
+                    interval=None,
+                    delete=True,
+                )
+
+        # The directory orphan must be the one deleted, not the exact
+        # 'data' object.
+        deleted_keys = [c[1]["Key"] for c in mock_s3.delete_object.call_args_list]
+        assert "data/orphan.txt" in deleted_keys
+        assert "data" not in deleted_keys
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_empty_when_source_missing(self, mock_boto_client):
+        """Real _sync_uploads skips registrations whose local_path doesn't
+        exist (no transfers, no deletes). plan_upload must mirror that
+        instead of reporting every remote object as 'would delete'."""
+        _setup_s3_mock(
+            mock_boto_client,
+            [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "does-not-exist"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_upload(
+                    "s3://bucket/data", local=str(missing)
+                )
+
+        assert plan.to_copy == []
+        assert plan.to_delete == []
+
+
 class TestSingleObjectDownload:
     """Downloading an exact S3 object key (not a prefix) must actually fetch
     the file. _scan_s3 used to emit a root directory marker that collided
