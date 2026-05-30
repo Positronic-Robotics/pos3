@@ -22,6 +22,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from . import (
     TransferError,
     _is_s3_path,
@@ -197,11 +199,32 @@ _COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    # Use parse_known_args so we can re-emit the error through the SUBPARSER
+    # for the chosen command. argparse's default routes "unrecognized
+    # arguments" to the top-level parser, which prints
+    #   usage: pos3 [-h] {ls,download,upload} ...
+    # — useless when the user typo'd a subcommand flag (e.g. `--dry_run`)
+    # because they can't see the flags the subcommand actually exposes.
+    namespace, leftover = parser.parse_known_args(argv)
+    if leftover:
+        subparsers_action = next(
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        )
+        sub = subparsers_action.choices.get(namespace.command, parser)
+        sub.error(f"unrecognized arguments: {' '.join(leftover)}")
+    args = namespace
     try:
         return _COMMANDS[args.command](args)
     except (ValueError, TransferError) as exc:
         print(f"pos3 {args.command}: {exc}", file=sys.stderr)
+        return 1
+    except (BotoCoreError, ClientError) as exc:
+        # boto3/botocore failures from S3 calls outside _process_futures —
+        # access denied, missing bucket, expired creds, throttling, etc.
+        # _scan_s3 (called by ls and the pre-transfer scan in download /
+        # upload / plan_*) re-raises non-404 ClientErrors directly, so they
+        # would otherwise escape main() and surface as a Python traceback.
+        print(f"pos3 {args.command}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 

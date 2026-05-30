@@ -269,7 +269,7 @@ class TestCliUpload:
         mock_boto_client.return_value.upload_file.assert_not_called()
 
     @patch(BOTO3_PATCH_TARGET)
-    def test_upload_uploads_existing_local_source(self, mock_boto_client):
+    def test_upload_uploads_existing_local_source(self, mock_boto_client, capsys):
         mock_s3 = _setup_s3_mock(mock_boto_client)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -279,8 +279,13 @@ class TestCliUpload:
 
             rc = main(["upload", "s3://bucket/data", "--local", str(src)])
 
+        captured = capsys.readouterr()
         assert rc == 0
         assert mock_s3.upload_file.call_count >= 1
+        # upload's success path is silent on stdout: no path, no progress.
+        # Progress bars and logs go to stderr. This is the counterpart to
+        # download's "exactly one line = local path" contract.
+        assert captured.out == ""
 
     @patch(BOTO3_PATCH_TARGET)
     def test_upload_default_source_is_cache_path(self, mock_boto_client):
@@ -492,3 +497,73 @@ class TestCliEntry:
         with pytest.raises(SystemExit) as exc:
             main([])
         assert exc.value.code != 0
+
+    def test_unknown_flag_uses_subcommand_usage(self, capsys):
+        """Typoing a subcommand flag (e.g. `--dry_run` instead of `--dry-run`)
+        must produce the SUBCOMMAND's usage, not the top-level one, so the
+        user can see which flags actually exist for what they ran."""
+        with pytest.raises(SystemExit) as exc:
+            main(["download", "s3://bucket/key", "--dry_run"])
+        assert exc.value.code == 2
+        captured = capsys.readouterr()
+        # The error must address the subcommand, not the top-level parser.
+        assert "pos3 download" in captured.err
+        # And it must show download's actual flags so the user can spot `-n`.
+        assert "[-n]" in captured.err or "--dry-run" in captured.err
+        # Sanity: NOT the top-level usage.
+        assert "{ls,download,upload}" not in captured.err
+
+
+class TestCliBotoErrors:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_ls_handles_client_error(self, mock_boto_client, capsys):
+        """A non-404 ClientError from _list_s3_objects (e.g. 403 access
+        denied) must produce the `pos3 ls: ...` error + exit 1, not a
+        Python traceback."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+
+        rc = main(["ls", "s3://bucket/key"])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "pos3 ls:" in captured.err
+        assert "ClientError" in captured.err
+        assert "403" in captured.err
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_handles_client_error_during_scan(self, mock_boto_client, capsys, tmp_path):
+        """ClientError raised from _scan_s3 (the pre-transfer scan inside
+        Mirror.download) must be caught by main(), not escape as a
+        traceback."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+
+        rc = main(["download", "s3://bucket/data", "--local", str(tmp_path / "dst")])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "pos3 download:" in captured.err
+        assert captured.out == ""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_dry_run_handles_client_error_during_plan(self, mock_boto_client, capsys, tmp_path):
+        """plan_download propagates ClientError too — it goes through
+        _scan_s3 the same way."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+
+        rc = main(["download", "-n", "s3://bucket/data", "--local", str(tmp_path / "dst")])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "pos3 download:" in captured.err
