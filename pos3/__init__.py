@@ -1169,4 +1169,52 @@ def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = Non
     return mirror_obj.ls(prefix, recursive, profile)
 
 
-__all__ = ["mirror", "with_mirror", "download", "upload", "sync", "ls", "register_profile", "Profile", "_parse_s3_url"]
+def plan_download(
+    remote: str,
+    local: str | Path | None = None,
+    exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
+) -> TransferPlan:
+    """Return the :class:`TransferPlan` ``download()`` would execute.
+
+    Side-effect free: reads from S3 and the local filesystem but performs
+    no transfers, deletes, or directory creation. Raises ``ValueError`` if
+    ``remote`` is not an ``s3://`` URL.
+    """
+    mirror_obj = _require_active_mirror()
+    return mirror_obj.plan_download(remote, local, exclude, profile)
+
+
+def plan_upload(
+    remote: str,
+    local: str | Path | None = None,
+    exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
+) -> TransferPlan:
+    """Return the :class:`TransferPlan` ``upload()`` would execute.
+
+    Side-effect free: reads from S3 and the local filesystem but performs
+    no transfers, deletes, or directory creation. Raises ``ValueError`` if
+    ``remote`` is not an ``s3://`` URL. Returns an empty plan when the
+    local source does not exist (matches real upload() behavior, which
+    skips registrations with a missing local_path).
+    """
+    mirror_obj = _require_active_mirror()
+    return mirror_obj.plan_upload(remote, local, exclude, profile)
+
+
+__all__ = [
+    "mirror",
+    "with_mirror",
+    "download",
+    "upload",
+    "sync",
+    "ls",
+    "plan_download",
+    "plan_upload",
+    "register_profile",
+    "Profile",
+    "TransferError",
+    "TransferPlan",
+    "_parse_s3_url",
+]

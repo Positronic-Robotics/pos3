@@ -31,6 +31,8 @@ from . import (
     download,
     ls,
     mirror,
+    plan_download,
+    plan_upload,
     upload,
 )
 from .profiles import _resolve_profile, _url_profile
@@ -163,7 +165,7 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _print_download_plan(args: argparse.Namespace) -> None:
-    plan = _require_active_mirror().plan_download(
+    plan = plan_download(
         args.url,
         local=args.local,
         exclude=args.exclude,
@@ -177,7 +179,7 @@ def _print_download_plan(args: argparse.Namespace) -> None:
 
 
 def _print_upload_plan(args: argparse.Namespace, source: Path) -> None:
-    plan = _require_active_mirror().plan_upload(
+    plan = plan_upload(
         args.url,
         local=str(source),
         exclude=args.exclude,

@@ -715,6 +715,37 @@ class TestSync:
                     s3.sync("s3://bucket/data", interval=None)
 
 
+class TestPlanPublicAPI:
+    """The plan API is callable via the public pos3.plan_download /
+    pos3.plan_upload module-level wrappers, the same way pos3.download /
+    pos3.upload are. Users following the README must not need to reach
+    into pos3._require_active_mirror()."""
+
+    def test_plan_download_and_upload_are_module_level(self):
+        # Sanity: they exist on the package surface.
+        assert callable(s3.plan_download)
+        assert callable(s3.plan_upload)
+        # And in __all__ so `from pos3 import *` includes them.
+        assert "plan_download" in s3.__all__
+        assert "plan_upload" in s3.__all__
+        assert "TransferPlan" in s3.__all__
+        assert "TransferError" in s3.__all__
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_via_public_wrapper(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                plan = s3.plan_download("s3://bucket/data", local=str(local_dir))
+
+        assert isinstance(plan, s3.TransferPlan)
+        sources = [src for src, _ in plan.to_copy]
+        assert "s3://bucket/data/file.txt" in sources
+
+
 class TestPlan:
     """plan_download / plan_upload return what a real call would do, without
     transferring, deleting, or creating directories."""

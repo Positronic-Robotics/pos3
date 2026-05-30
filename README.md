@@ -148,10 +148,18 @@ interactive shell use; pass `--delete` explicitly to mirror file removals.
 
 `-n` / `--dry-run` is accepted on `download` and `upload` (not `ls`). It
 prints per-file plan lines to stdout in `aws s3 sync --dryrun` style and
-performs no transfers, no deletes, and no local directory creation. The
-underlying `Mirror.plan_download` / `Mirror.plan_upload` methods are
-public — call them directly to inspect what `download()` / `upload()`
-*would* do.
+performs no transfers, no deletes, and no local directory creation.
+
+The same plan is available from Python via `pos3.plan_download` and
+`pos3.plan_upload`, each returning a `pos3.TransferPlan` with
+`to_copy: list[tuple[str, str]]` and `to_delete: list[str]`:
+
+```python
+with pos3.mirror():
+    plan = pos3.plan_download("s3://bucket/dataset/", local="./data/")
+    for src, dst in plan.to_copy:
+        print(f"would download {src} → {dst}")
+```
 
 `download` and `upload` require an `s3://` URL; non-S3 inputs are rejected
 with a non-zero exit. `ls` still accepts both `s3://` prefixes and local

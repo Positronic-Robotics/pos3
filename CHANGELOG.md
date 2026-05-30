@@ -25,11 +25,13 @@
     local-path passthrough still works in code; the CLI rejects non-S3
     inputs with a clear error so a typo can't silently succeed. `ls` is
     unchanged and still accepts both forms.
-- `pos3.TransferPlan` dataclass plus `Mirror.plan_download(remote, ...)` and
-  `Mirror.plan_upload(remote, ...)` methods: compute the set of
+- `pos3.TransferPlan` dataclass plus module-level `pos3.plan_download(remote, ...)`
+  and `pos3.plan_upload(remote, ...)` wrappers: compute the set of
   `(source, destination)` copies and target deletes a real call would
-  perform, without performing any of them. The CLI's `-n` / `--dry-run`
-  is implemented on top of these.
+  perform, without performing any of them. Same calling pattern as
+  `pos3.download` / `pos3.upload` — use them inside a `with pos3.mirror():`
+  block. The CLI's `-n` / `--dry-run` is implemented on top of these.
+- `TransferError` and `TransferPlan` are now in `pos3.__all__`.
 
 ### Changed
 - Per-object transfer failures now raise `pos3.TransferError` instead of
