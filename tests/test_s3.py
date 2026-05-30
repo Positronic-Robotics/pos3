@@ -244,6 +244,35 @@ class TestUpload:
         assert mock_s3.upload_file.call_count >= 2
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_background_worker_survives_transfer_error(self, mock_boto_client):
+        """A TransferError from one interval-sync iteration must not kill the
+        daemon thread; subsequent ticks should keep retrying."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        call_count = {"n": 0}
+
+        def upload_side_effect(*_args, **_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("transient")
+            # Subsequent calls succeed (no return value needed).
+
+        mock_s3.upload_file.side_effect = upload_side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload("s3://bucket/output", local=output, interval=1)
+                time.sleep(2.5)
+
+        # If the worker had died after the first failure, count would stay at 1.
+        # Surviving means at least one more attempt happened on a later tick.
+        assert call_count["n"] >= 2
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_upload_no_sync_on_error(self, mock_boto_client):
         """Test that uploads with sync_on_error=False don't sync when context exits with error."""
         mock_s3 = _setup_s3_mock(mock_boto_client)
@@ -684,6 +713,384 @@ class TestSync:
                 # Second sync call tries to download, which conflicts with existing upload
                 with pytest.raises(ValueError, match="Conflict"):
                     s3.sync("s3://bucket/data", interval=None)
+
+
+class TestPlanPublicAPI:
+    """The plan API is callable via the public pos3.plan_download /
+    pos3.plan_upload module-level wrappers, the same way pos3.download /
+    pos3.upload are. Users following the README must not need to reach
+    into pos3._require_active_mirror()."""
+
+    def test_plan_download_and_upload_are_module_level(self):
+        # Sanity: they exist on the package surface.
+        assert callable(s3.plan_download)
+        assert callable(s3.plan_upload)
+        # And in __all__ so `from pos3 import *` includes them.
+        assert "plan_download" in s3.__all__
+        assert "plan_upload" in s3.__all__
+        assert "TransferPlan" in s3.__all__
+        assert "TransferError" in s3.__all__
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_via_public_wrapper(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                plan = s3.plan_download("s3://bucket/data", local=str(local_dir))
+
+        assert isinstance(plan, s3.TransferPlan)
+        sources = [src for src, _ in plan.to_copy]
+        assert "s3://bucket/data/file.txt" in sources
+
+
+class TestPlan:
+    """plan_download / plan_upload return what a real call would do, without
+    transferring, deleting, or creating directories."""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_lists_files_to_copy(self, mock_boto_client):
+        paginate = [
+            {
+                "Contents": [
+                    {"Key": "data/file.txt", "Size": 5},
+                    {"Key": "data/sub/nested.txt", "Size": 7},
+                ]
+            }
+        ]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False) as _:
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data", local=str(local_dir)
+                )
+
+        sources = [src for src, _ in plan.to_copy]
+        assert "s3://bucket/data/file.txt" in sources
+        assert "s3://bucket/data/sub/nested.txt" in sources
+        # No real transfer happened.
+        mock_s3.download_file.assert_not_called()
+        # Directory entries are filtered out — file-level only.
+        assert all(not src.endswith("/") for src in sources)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_lists_orphans_in_to_delete(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/keep.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "data"
+            local_dir.mkdir()
+            (local_dir / "keep.txt").write_bytes(b"12345")
+            orphan = local_dir / "orphan.txt"
+            orphan.write_text("x")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data", local=str(local_dir)
+                )
+
+            # Dry-plan is read-only.
+            assert orphan.exists()
+
+        assert str(orphan) in plan.to_delete
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_lists_files_to_copy(self, mock_boto_client):
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "src"
+            src.mkdir()
+            (src / "file.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_upload(
+                    "s3://bucket/data", local=str(src)
+                )
+
+        destinations = [dst for _, dst in plan.to_copy]
+        assert destinations == ["s3://bucket/data/file.txt"]
+        mock_s3.upload_file.assert_not_called()
+
+    def test_plan_download_rejects_non_s3_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                with pytest.raises(ValueError, match="s3:// URL"):
+                    _require_active_mirror().plan_download("/local/path")
+
+    def test_plan_upload_rejects_non_s3_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                with pytest.raises(ValueError, match="s3:// URL"):
+                    _require_active_mirror().plan_upload("/local/path", local=tmpdir)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_normalizes_trailing_slash_in_url(self, mock_boto_client):
+        """A trailing slash on the input URL must not produce s3://bucket/data//file.txt
+        in the plan — Mirror.download normalizes before parsing and plan_* must agree."""
+        paginate = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data/", local=str(local_dir)
+                )
+
+        sources = [src for src, _ in plan.to_copy]
+        assert sources == ["s3://bucket/data/file.txt"]
+        assert all("//" not in src.replace("s3://", "") for src in sources)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_download_trailing_slash_forces_directory_listing(self, mock_boto_client):
+        """`pos3 download -n s3://bucket/data/` must plan the directory
+        contents even if an exact object `data` also exists. Pre-fix,
+        plan_download normalized away the slash, head_object('data') won,
+        and the plan reported the exact-object copy instead of `data/*`."""
+        mock_s3 = _setup_s3_mock(
+            mock_boto_client,
+            [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}],
+        )
+        # Exact 'data' object ALSO exists — without preserving the slash,
+        # head_object('data') would win and shadow the directory contents.
+        mock_s3.head_object.side_effect = None
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_download(
+                    "s3://bucket/data/", local=str(Path(tmpdir) / "dst")
+                )
+
+        sources = [src for src, _ in plan.to_copy]
+        assert sources == ["s3://bucket/data/file.txt"]
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_normalizes_trailing_slash_in_url(self, mock_boto_client):
+        paginate = [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "src"
+            src.mkdir()
+            (src / "file.txt").write_text("content")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_upload(
+                    "s3://bucket/data/", local=str(src)
+                )
+
+        destinations = [dst for _, dst in plan.to_copy]
+        assert destinations == ["s3://bucket/data/file.txt"]
+        # And the delete list, which also goes through _make_s3_key for upload.
+        assert plan.to_delete == ["s3://bucket/data/orphan.txt"]
+
+
+class TestTrailingSlashRealTransfers:
+    """The real (non-dry-run) download() and upload() paths must preserve
+    the user's trailing-slash intent. Mirror.download / _sync_uploads used
+    to normalize the URL before scanning, letting head_object('data') win
+    over the requested data/ directory listing."""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_trailing_slash_transfers_directory_contents(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # Both: an exact 'data' object AND objects under 'data/' exist.
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "data/file.txt", "Size": 5}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = Path(tmpdir) / "dst"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/data/", local=str(local), delete=False)
+
+        # The directory content must be the one downloaded, not the exact
+        # 'data' object that head_object would have picked up.
+        keys = [c[0][1] for c in mock_s3.download_file.call_args_list]
+        assert keys == ["data/file.txt"]
+        assert "data" not in keys
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_trailing_slash_scans_directory_for_delete(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # Exact 'data' object AND an orphan under 'data/' both exist.
+        mock_s3.head_object.return_value = {"ContentLength": 100}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [
+            {"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "src"
+            source.mkdir()
+            (source / "file.txt").write_text("x")
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload(
+                    "s3://bucket/data/",
+                    local=str(source),
+                    interval=None,
+                    delete=True,
+                )
+
+        # The directory orphan must be the one deleted, not the exact
+        # 'data' object.
+        deleted_keys = [c[1]["Key"] for c in mock_s3.delete_object.call_args_list]
+        assert "data/orphan.txt" in deleted_keys
+        assert "data" not in deleted_keys
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_empty_when_source_missing(self, mock_boto_client):
+        """Real _sync_uploads skips registrations whose local_path doesn't
+        exist (no transfers, no deletes). plan_upload must mirror that
+        instead of reporting every remote object as 'would delete'."""
+        _setup_s3_mock(
+            mock_boto_client,
+            [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "does-not-exist"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                from pos3 import _require_active_mirror
+
+                plan = _require_active_mirror().plan_upload(
+                    "s3://bucket/data", local=str(missing)
+                )
+
+        assert plan.to_copy == []
+        assert plan.to_delete == []
+
+
+class TestSingleObjectDownload:
+    """Downloading an exact S3 object key (not a prefix) must actually fetch
+    the file. _scan_s3 used to emit a root directory marker that collided
+    with the file in _compute_sync_diff's dict, causing download() to mkdir
+    the local path instead of calling download_file."""
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_single_object_calls_download_file(self, mock_boto_client):
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # head_object 200 → _list_s3_objects yields the exact object.
+        mock_s3.head_object.return_value = {"ContentLength": 42, "Size": 42}
+        mock_paginator = Mock()
+        mock_s3.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = [{"Contents": []}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = Path(tmpdir) / "results.json"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/results.json", local=str(local))
+
+        assert mock_s3.download_file.call_count == 1
+        args = mock_s3.download_file.call_args[0]
+        assert args[0] == "bucket"
+        assert args[1] == "results.json"
+        assert args[2] == str(local)
+
+
+class TestMirrorConstructorIsSideEffectFree:
+    def test_constructing_mirror_does_not_create_cache_root(self):
+        """Constructing a Mirror (entering pos3.mirror()) must not mkdir the
+        cache root — dry-run and planning paths rely on this."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_root = Path(tmpdir) / "nested" / "cache" / "root"
+            assert not cache_root.exists()
+
+            with s3.mirror(cache_root=str(cache_root), show_progress=False):
+                # Just entering the context must not have created cache_root.
+                assert not cache_root.exists()
+
+
+class TestFinalSyncPreservesOriginalException:
+    @patch(BOTO3_PATCH_TARGET)
+    def test_app_exception_survives_failed_cleanup_sync(self, mock_boto_client):
+        """When the mirror body raises AND a sync_on_error upload's cleanup
+        sync also fails, the user must see the app exception, not the
+        TransferError from cleanup."""
+        mock_s3 = _setup_s3_mock(mock_boto_client)
+        mock_s3.upload_file.side_effect = RuntimeError("cleanup upload failed")
+
+        class AppError(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+
+            with pytest.raises(AppError, match="the real failure"):
+                with s3.mirror(cache_root=tmpdir, show_progress=False):
+                    s3.upload(
+                        "s3://bucket/output",
+                        local=output,
+                        interval=None,
+                        sync_on_error=True,
+                    )
+                    raise AppError("the real failure")
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_app_exception_survives_scan_client_error_in_cleanup(self, mock_boto_client):
+        """Cleanup-time _scan_s3 can raise ClientError (e.g. 403) BEFORE
+        any worker future is created — that path bypasses TransferError.
+        The cleanup catch must be broad enough to preserve the app
+        exception in this case too."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # _scan_s3 → _list_s3_objects calls head_object first. A 403 here
+        # propagates through the scan iterator, not through a worker future,
+        # so the previous TransferError-only catch would have unmasked it.
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+
+        class AppError(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+
+            with pytest.raises(AppError, match="the real failure"):
+                with s3.mirror(cache_root=tmpdir, show_progress=False):
+                    s3.upload(
+                        "s3://bucket/output",
+                        local=output,
+                        interval=None,
+                        sync_on_error=True,
+                    )
+                    raise AppError("the real failure")
 
 
 class TestLs:

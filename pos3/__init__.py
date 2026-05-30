@@ -80,12 +80,56 @@ def _make_s3_key(prefix: str, info: FileInfo) -> str:
     return key
 
 
+class TransferError(Exception):
+    """Raised when one or more S3 transfer or delete workers failed.
+
+    ``failures`` carries the per-worker exceptions; the message names the
+    operation (Download / Upload / Delete) and the failure count.
+    """
+
+    def __init__(self, operation: str, failures: list[BaseException]):
+        super().__init__(f"{operation}: {len(failures)} worker(s) failed: {failures[0]}")
+        self.operation = operation
+        self.failures = failures
+
+
+@dataclass(frozen=True)
+class TransferPlan:
+    """The set of operations a download/upload *would* perform, if executed.
+
+    Returned by :meth:`_Mirror.plan_download` and :meth:`_Mirror.plan_upload`.
+
+    ``to_copy`` is a list of ``(source, destination)`` pairs as strings —
+    each pair is one ``s3://bucket/key`` URL and one local filesystem path,
+    direction depending on whether the plan is for download or upload.
+    ``to_delete`` is a list of destination URLs / paths that ``delete=True``
+    on the corresponding call would remove. Directory-only entries from
+    the underlying scan are filtered out so the plan only reflects file
+    operations.
+    """
+
+    to_copy: list[tuple[str, str]]
+    to_delete: list[str]
+
+
 def _process_futures(futures, operation: str) -> None:
+    """Drain ``futures`` and raise :class:`TransferError` if any worker failed.
+
+    Drains all futures before raising, so a 1-of-N failure does not cancel
+    the rest of the batch (preserves best-effort completion). Callers that
+    need to keep going across failures wrap this in ``try / except`` — the
+    only such caller today is :meth:`_Mirror._background_worker`, which
+    treats interval syncs as retry-next-tick.
+    """
+    failures: list[BaseException] = []
     for future in futures:
         try:
             future.result()
         except Exception as exc:
             logger.error("%s failed: %s", operation, exc)
+            failures.append(exc)
+    if failures:
+        raise TransferError(operation, failures)
 
 
 @dataclass(frozen=True)
@@ -210,7 +254,7 @@ class _DownloadRegistration:
 
 @dataclass
 class _UploadRegistration:
-    remote: str
+    remote: str  # normalized form — used as the registration / dedup key
     local_path: Path
     interval: int | None
     delete: bool
@@ -218,6 +262,11 @@ class _UploadRegistration:
     exclude: list[str] | None
     profile: Profile | None = None
     last_sync: float = 0.0
+    # The user's original URL, preserving trailing-slash intent. _sync_uploads
+    # parses it raw so `s3://bucket/data/` skips head_object('data') in
+    # _list_s3_objects and scans the directory as the user meant. NOT
+    # compared in __eq__ — only the normalized form determines identity.
+    raw_remote: str = ""
 
     def __eq__(self, other):
         if not isinstance(other, _UploadRegistration):
@@ -241,8 +290,11 @@ _GLOBAL_ACTIVE_MIRROR: _Mirror | None = None
 class _Mirror:
     def __init__(self, options: _Options):
         self.options = options
+        # cache_root is resolved eagerly but NOT created — the per-file
+        # workers (_put_locally) mkdir the leaf directory on demand. Keeping
+        # the constructor side-effect free lets dry-run / planning paths
+        # construct a Mirror without mutating the filesystem.
         self.cache_root = Path(self.options.cache_root).expanduser().resolve()
-        self.cache_root.mkdir(parents=True, exist_ok=True)
 
         self._default_profile = options.default_profile
         self._clients: dict[Profile | None, Any] = {}
@@ -318,6 +370,7 @@ class _Mirror:
         Raises:
             FileNotFoundError: If remote is a local path that does not exist.
             ValueError: If download registration conflicts with an existing download or upload or parameters differ.
+            TransferError: If any object failed to download (was previously logged and swallowed).
         """
         effective_profile = self._effective_profile(profile, remote)
 
@@ -351,7 +404,9 @@ class _Mirror:
 
         if need_download:
             try:
-                self._perform_download(normalized, local_path, delete, exclude, effective_profile)
+                # Pass the raw URL — _perform_download preserves trailing
+                # slashes for scanning while normalizing for output keys.
+                self._perform_download(remote, local_path, delete, exclude, effective_profile)
             except Exception as exc:
                 registration.error = exc
                 registration.ready.set()
@@ -394,6 +449,8 @@ class _Mirror:
 
         Raises:
             ValueError: If upload registration conflicts with an existing download or upload or parameters differ.
+            TransferError: Raised from the mirror context exit (or background sync) if any object failed to upload
+                or delete (was previously logged and swallowed).
         """
         effective_profile = self._effective_profile(profile, remote)
 
@@ -418,6 +475,7 @@ class _Mirror:
             exclude=exclude,
             profile=effective_profile,
             last_sync=0,
+            raw_remote=remote,
         )
 
         with self._lock:
@@ -434,6 +492,109 @@ class _Mirror:
                 self._ensure_background_thread_unlocked()
 
         return local_path
+
+    def plan_download(
+        self,
+        remote: str,
+        local: str | Path | None = None,
+        exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
+    ) -> TransferPlan:
+        """Compute the :class:`TransferPlan` ``download()`` would execute.
+
+        Reads from S3 and the local filesystem but performs no transfers,
+        no deletes, and no directory creation. Raises ``ValueError`` if
+        ``remote`` is not an ``s3://`` URL.
+        """
+        if not _is_s3_path(remote):
+            raise ValueError(f"plan_download requires an s3:// URL, got: {remote}")
+        effective_profile = self._effective_profile(profile, remote)
+        local_path = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
+        # Two prefixes on purpose: the raw one preserves the user's
+        # trailing-slash intent so _list_s3_objects skips its exact-key
+        # head_object probe (matters when both `data` and `data/...` exist);
+        # the normalized one feeds _make_s3_key so reconstructed output keys
+        # don't get a double slash. _scan_s3 strips len(scan_prefix) then
+        # lstrip("/"), so the same FileInfo.relative_path drops out either
+        # way.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
+        to_copy, to_delete = _compute_sync_diff(
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
+            _filter_fileinfo(_scan_local(local_path), exclude),
+        )
+        copies: list[tuple[str, str]] = []
+        for info in to_copy:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(out_prefix, info)
+            dst = local_path / info.relative_path if info.relative_path else local_path
+            copies.append((f"s3://{bucket}/{s3_key}", str(dst)))
+        deletes: list[str] = []
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            target = local_path / info.relative_path if info.relative_path else local_path
+            deletes.append(str(target))
+        return TransferPlan(to_copy=copies, to_delete=deletes)
+
+    def plan_upload(
+        self,
+        remote: str,
+        local: str | Path | None = None,
+        exclude: list[str] | None = None,
+        profile: str | Profile | None = None,
+    ) -> TransferPlan:
+        """Compute the :class:`TransferPlan` ``upload()`` would execute.
+
+        Reads from S3 and the local filesystem but performs no transfers,
+        no deletes, and no directory creation. Raises ``ValueError`` if
+        ``remote`` is not an ``s3://`` URL. A missing local source yields
+        an empty ``to_copy``.
+        """
+        if not _is_s3_path(remote):
+            raise ValueError(f"plan_upload requires an s3:// URL, got: {remote}")
+        effective_profile = self._effective_profile(profile, remote)
+        source = (
+            self.options.cache_path_for(remote, effective_profile)
+            if local is None
+            else Path(local).expanduser().resolve()
+        )
+        # Mirror real upload() behavior: _sync_uploads skips any registration
+        # whose local_path does not exist (does nothing — not even deletes).
+        # Without this short-circuit, _scan_local yields nothing while
+        # _scan_s3 yields remote objects, so _compute_sync_diff would
+        # falsely report every remote object as "would delete" — a plan the
+        # real call would never execute.
+        if not source.exists():
+            return TransferPlan(to_copy=[], to_delete=[])
+        # Two prefixes on purpose — see plan_download for the rationale. The
+        # raw prefix preserves trailing-slash intent for the S3 scan; the
+        # normalized one builds collision-free output keys.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
+        to_copy, to_delete = _compute_sync_diff(
+            _filter_fileinfo(_scan_local(source), exclude),
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
+        )
+        copies: list[tuple[str, str]] = []
+        for info in to_copy:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(out_prefix, info)
+            src = source / info.relative_path if info.relative_path else source
+            copies.append((str(src), f"s3://{bucket}/{s3_key}"))
+        deletes: list[str] = []
+        for info in to_delete:
+            if info.is_dir:
+                continue
+            s3_key = _make_s3_key(out_prefix, info)
+            deletes.append(f"s3://{bucket}/{s3_key}")
+        return TransferPlan(to_copy=copies, to_delete=deletes)
 
     def sync(
         self,
@@ -462,23 +623,40 @@ class _Mirror:
         effective_profile = self._effective_profile(profile, prefix)
 
         if _is_s3_path(prefix):
-            normalized = _normalize_s3_url(prefix)
-            bucket, key = _parse_s3_url(normalized)
-            # Ensure directory-like listing by appending '/' to avoid spurious prefix matches
-            if key:
-                key = key + "/"
+            # Use _parse_s3_url directly, NOT _normalize_s3_url: the latter
+            # strips trailing slashes, but `s3://bucket/data/` vs
+            # `s3://bucket/data` carries user intent here — the trailing
+            # slash means "treat as a directory prefix". _list_s3_objects
+            # respects that ("if key and not key.endswith('/')") so we
+            # preserve it. Otherwise a key collision (an exact object named
+            # `data` plus a `data/` directory) would silently hide the
+            # directory contents.
+            bucket, key = _parse_s3_url(prefix)
+            # Don't force a trailing "/" here. _list_s3_objects probes the
+            # key as an exact object first (via head_object) and only falls
+            # back to directory listing with a trailing "/" on 404. Forcing
+            # the slash here suppresses the exact-key probe, so
+            # `pos3 ls s3://bucket/results.json` would return nothing for an
+            # existing object. The "droid/recovery" vs "droid/recovery_towels"
+            # spurious-prefix case is already covered there.
             items = []
             for info in self._scan_s3(bucket, key, effective_profile):
-                if info.relative_path:
-                    # Skip nested items if not recursive
-                    if not recursive and "/" in info.relative_path:
-                        continue
-                    # Reconstruct the full S3 key
-                    if key:
-                        s3_key = key.rstrip("/") + "/" + info.relative_path
-                    else:
-                        s3_key = info.relative_path
-                    items.append(f"s3://{bucket}/{s3_key}")
+                if not info.relative_path:
+                    # Empty relative_path means either the root directory
+                    # marker (skip) or that ``key`` was the exact object key
+                    # — yield the input URL as a single-line result.
+                    if not info.is_dir:
+                        items.append(f"s3://{bucket}/{key}")
+                    continue
+                # Skip nested items if not recursive
+                if not recursive and "/" in info.relative_path:
+                    continue
+                # Reconstruct the full S3 key
+                if key:
+                    s3_key = key.rstrip("/") + "/" + info.relative_path
+                else:
+                    s3_key = info.relative_path
+                items.append(f"s3://{bucket}/{s3_key}")
             return items
         else:
             display_path = Path(prefix).expanduser()
@@ -526,14 +704,43 @@ class _Mirror:
                         registration.last_sync = now
                         due.append(registration)
 
-            self._sync_uploads(due)
+            try:
+                self._sync_uploads(due)
+            except Exception as exc:
+                # Background interval syncs are best-effort: a TransferError
+                # (or anything else) here must not kill the daemon thread —
+                # the next tick will retry. _final_sync still propagates on
+                # context exit so one-shot callers see definitive failures.
+                logger.error("Background sync iteration failed: %s", exc)
 
     def _final_sync(self, had_error: bool = False) -> None:
         with self._lock:
             uploads = list(self._uploads.values())
         if had_error:
+            # The mirror() context is already unwinding with the caller's
+            # exception. Anything that goes wrong in cleanup must be
+            # logged and swallowed so the original exception stays the
+            # visible cause. The exception type can be:
+            #   - TransferError (worker put/delete failure, after
+            #     _sync_uploads built futures)
+            #   - ClientError / BotoCoreError (_scan_s3 → head_object /
+            #     paginate, BEFORE any worker future exists)
+            #   - OSError on the local fs, etc.
+            # Catching broad Exception here is the right call: the
+            # `had_error=True` path is fundamentally "best-effort, do no
+            # more harm." The clean-exit path (had_error=False) still
+            # propagates so one-shot callers see definitive failures.
             uploads = [u for u in uploads if u.sync_on_error]
-        self._sync_uploads(uploads)
+            try:
+                self._sync_uploads(uploads)
+            except Exception as exc:
+                logger.error(
+                    "Cleanup sync after error failed; original exception preserved: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        else:
+            self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
         tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []
@@ -541,7 +748,11 @@ class _Mirror:
             if registration.local_path.exists():
                 tasks.append(
                     (
-                        registration.remote,
+                        # raw_remote preserves the user's trailing slash so
+                        # _list_s3_objects skips its exact-key head_object
+                        # probe; out-key building below normalizes to avoid
+                        # double slashes.
+                        registration.raw_remote or registration.remote,
                         registration.local_path,
                         registration.delete,
                         registration.exclude,
@@ -558,19 +769,20 @@ class _Mirror:
 
         for remote, local_path, delete, exclude, profile in tasks:
             logger.debug("Syncing upload: %s from %s (delete=%s)", remote, local_path, delete)
-            bucket, prefix = _parse_s3_url(remote)
+            scan_bucket, scan_prefix = _parse_s3_url(remote)
+            bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
             to_copy, to_delete = _compute_sync_diff(
                 _filter_fileinfo(_scan_local(local_path), exclude),
-                _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
+                _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
             )
 
             for info in to_copy:
-                s3_key = _make_s3_key(prefix, info)
+                s3_key = _make_s3_key(out_prefix, info)
                 to_put.append((info, local_path, bucket, s3_key, profile))
                 total_bytes += info.size
 
             for info in to_delete if delete else []:
-                s3_key = _make_s3_key(prefix, info)
+                s3_key = _make_s3_key(out_prefix, info)
                 to_remove.append((bucket, s3_key, profile))
 
         if to_put:
@@ -608,16 +820,21 @@ class _Mirror:
         exclude: list[str] | None,
         profile: Profile | None = None,
     ) -> None:
-        bucket, prefix = _parse_s3_url(remote)
+        # Dual-prefix: raw remote preserves the user's trailing slash so
+        # _list_s3_objects skips its exact-key head_object probe (matters
+        # when both `data` and `data/` exist); normalized remote feeds
+        # _make_s3_key so output keys don't get double slashes.
+        scan_bucket, scan_prefix = _parse_s3_url(remote)
+        bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
         logger.debug(
             "Performing download: s3://%s/%s to %s (delete=%s)",
-            bucket,
-            prefix,
+            scan_bucket,
+            scan_prefix,
             local_path,
             delete,
         )
         to_copy, to_delete = _compute_sync_diff(
-            _filter_fileinfo(self._scan_s3(bucket, prefix, profile), exclude),
+            _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
             _filter_fileinfo(_scan_local(local_path), exclude),
         )
 
@@ -626,7 +843,7 @@ class _Mirror:
         total_bytes = 0
 
         for info in to_copy:
-            s3_key = _make_s3_key(prefix, info)
+            s3_key = _make_s3_key(out_prefix, info)
             to_put.append((info, bucket, s3_key, local_path))
             total_bytes += info.size
 
@@ -691,6 +908,13 @@ class _Mirror:
         logger.debug("Scanning S3: s3://%s/%s", bucket, prefix)
         seen_dirs: set[str] = set()
         has_content = False
+        # When the prefix matches an exact object (head_object hit in
+        # _list_s3_objects), we emit a file FileInfo with relative_path="".
+        # In that case the root-dir marker below would collide with it in
+        # _compute_sync_diff's dict-by-relative_path and silently win,
+        # causing download() to mkdir the local path instead of fetching
+        # the object. Track this to suppress the redundant marker.
+        has_root_file = False
 
         for obj in self._list_s3_objects(bucket, prefix, profile):
             has_content = True
@@ -703,6 +927,8 @@ class _Mirror:
                     yield FileInfo(relative_path=relative, size=0, is_dir=True)
                     seen_dirs.add(relative)
             else:
+                if relative == "":
+                    has_root_file = True
                 yield FileInfo(relative_path=relative, size=obj["Size"], is_dir=False)
 
                 if "/" in relative:
@@ -713,7 +939,7 @@ class _Mirror:
                             yield FileInfo(relative_path=dir_path, size=0, is_dir=True)
                             seen_dirs.add(dir_path)
 
-        if has_content:
+        if has_content and not has_root_file:
             yield FileInfo(
                 relative_path="", size=0, is_dir=True
             )  # Yield root directory marker for symmetry with _scan_local
@@ -952,4 +1178,52 @@ def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = Non
     return mirror_obj.ls(prefix, recursive, profile)
 
 
-__all__ = ["mirror", "with_mirror", "download", "upload", "sync", "ls", "register_profile", "Profile", "_parse_s3_url"]
+def plan_download(
+    remote: str,
+    local: str | Path | None = None,
+    exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
+) -> TransferPlan:
+    """Return the :class:`TransferPlan` ``download()`` would execute.
+
+    Side-effect free: reads from S3 and the local filesystem but performs
+    no transfers, deletes, or directory creation. Raises ``ValueError`` if
+    ``remote`` is not an ``s3://`` URL.
+    """
+    mirror_obj = _require_active_mirror()
+    return mirror_obj.plan_download(remote, local, exclude, profile)
+
+
+def plan_upload(
+    remote: str,
+    local: str | Path | None = None,
+    exclude: list[str] | None = None,
+    profile: str | Profile | None = None,
+) -> TransferPlan:
+    """Return the :class:`TransferPlan` ``upload()`` would execute.
+
+    Side-effect free: reads from S3 and the local filesystem but performs
+    no transfers, deletes, or directory creation. Raises ``ValueError`` if
+    ``remote`` is not an ``s3://`` URL. Returns an empty plan when the
+    local source does not exist (matches real upload() behavior, which
+    skips registrations with a missing local_path).
+    """
+    mirror_obj = _require_active_mirror()
+    return mirror_obj.plan_upload(remote, local, exclude, profile)
+
+
+__all__ = [
+    "mirror",
+    "with_mirror",
+    "download",
+    "upload",
+    "sync",
+    "ls",
+    "plan_download",
+    "plan_upload",
+    "register_profile",
+    "Profile",
+    "TransferError",
+    "TransferPlan",
+    "_parse_s3_url",
+]
