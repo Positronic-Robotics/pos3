@@ -1059,6 +1059,39 @@ class TestFinalSyncPreservesOriginalException:
                     )
                     raise AppError("the real failure")
 
+    @patch(BOTO3_PATCH_TARGET)
+    def test_app_exception_survives_scan_client_error_in_cleanup(self, mock_boto_client):
+        """Cleanup-time _scan_s3 can raise ClientError (e.g. 403) BEFORE
+        any worker future is created — that path bypasses TransferError.
+        The cleanup catch must be broad enough to preserve the app
+        exception in this case too."""
+        mock_s3 = Mock()
+        mock_boto_client.return_value = mock_s3
+        # _scan_s3 → _list_s3_objects calls head_object first. A 403 here
+        # propagates through the scan iterator, not through a worker future,
+        # so the previous TransferError-only catch would have unmasked it.
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+
+        class AppError(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+
+            with pytest.raises(AppError, match="the real failure"):
+                with s3.mirror(cache_root=tmpdir, show_progress=False):
+                    s3.upload(
+                        "s3://bucket/output",
+                        local=output,
+                        interval=None,
+                        sync_on_error=True,
+                    )
+                    raise AppError("the real failure")
+
 
 class TestLs:
     def test_ls_local_non_recursive(self):

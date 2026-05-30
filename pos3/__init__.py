@@ -718,17 +718,26 @@ class _Mirror:
             uploads = list(self._uploads.values())
         if had_error:
             # The mirror() context is already unwinding with the caller's
-            # exception. If this cleanup sync also fails, swallow it so the
-            # original exception stays the visible cause — a TransferError
-            # from cleanup is logged but must not mask the failure that
-            # triggered cleanup. The clean-exit path (had_error=False)
-            # still propagates so the CLI exits non-zero on failure.
+            # exception. Anything that goes wrong in cleanup must be
+            # logged and swallowed so the original exception stays the
+            # visible cause. The exception type can be:
+            #   - TransferError (worker put/delete failure, after
+            #     _sync_uploads built futures)
+            #   - ClientError / BotoCoreError (_scan_s3 → head_object /
+            #     paginate, BEFORE any worker future exists)
+            #   - OSError on the local fs, etc.
+            # Catching broad Exception here is the right call: the
+            # `had_error=True` path is fundamentally "best-effort, do no
+            # more harm." The clean-exit path (had_error=False) still
+            # propagates so one-shot callers see definitive failures.
             uploads = [u for u in uploads if u.sync_on_error]
             try:
                 self._sync_uploads(uploads)
-            except TransferError as exc:
+            except Exception as exc:
                 logger.error(
-                    "Cleanup sync after error failed; original exception preserved: %s", exc
+                    "Cleanup sync after error failed; original exception preserved: %s: %s",
+                    type(exc).__name__,
+                    exc,
                 )
         else:
             self._sync_uploads(uploads)
