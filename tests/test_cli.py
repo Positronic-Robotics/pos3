@@ -427,18 +427,14 @@ class TestCliDryRun:
             orphan = local_dir / "orphan.txt"
             orphan.write_text("orphan")
 
-            rc = main(
-                ["download", "-n", "s3://bucket/data", "--local", str(local_dir), "--delete"]
-            )
+            rc = main(["download", "-n", "s3://bucket/data", "--local", str(local_dir), "--delete"])
 
             assert rc == 0
             # Dry-run must not touch the filesystem.
             assert orphan.exists()
 
         captured = capsys.readouterr()
-        delete_lines = [
-            line for line in captured.out.splitlines() if line.startswith("delete:")
-        ]
+        delete_lines = [line for line in captured.out.splitlines() if line.startswith("delete:")]
         assert any(str(orphan) in line for line in delete_lines)
         mock_s3.download_file.assert_not_called()
 
@@ -456,9 +452,7 @@ class TestCliDryRun:
         captured = capsys.readouterr()
         assert rc == 0
         mock_s3.upload_file.assert_not_called()
-        upload_lines = [
-            line for line in captured.out.splitlines() if line.startswith("upload:")
-        ]
+        upload_lines = [line for line in captured.out.splitlines() if line.startswith("upload:")]
         assert len(upload_lines) == 1
         assert "s3://bucket/data/file.txt" in upload_lines[0]
         assert str(src / "file.txt") in upload_lines[0]
@@ -473,17 +467,13 @@ class TestCliDryRun:
             src.mkdir()
             (src / "file.txt").write_text("content")
 
-            rc = main(
-                ["upload", "-n", "s3://bucket/data", "--local", str(src), "--delete"]
-            )
+            rc = main(["upload", "-n", "s3://bucket/data", "--local", str(src), "--delete"])
 
         captured = capsys.readouterr()
         assert rc == 0
         mock_s3.upload_file.assert_not_called()
         mock_s3.delete_object.assert_not_called()
-        delete_lines = [
-            line for line in captured.out.splitlines() if line.startswith("delete:")
-        ]
+        delete_lines = [line for line in captured.out.splitlines() if line.startswith("delete:")]
         assert any("s3://bucket/data/remote_only.txt" in line for line in delete_lines)
 
     def test_dry_run_not_accepted_on_ls(self):
@@ -522,9 +512,7 @@ class TestCliBotoErrors:
         Python traceback."""
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
-        mock_s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
-        )
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
 
         rc = main(["ls", "s3://bucket/key"])
 
@@ -541,9 +529,7 @@ class TestCliBotoErrors:
         traceback."""
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
-        mock_s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
-        )
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
 
         rc = main(["download", "s3://bucket/data", "--local", str(tmp_path / "dst")])
 
@@ -558,9 +544,7 @@ class TestCliBotoErrors:
         _scan_s3 the same way."""
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
-        mock_s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
-        )
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
 
         rc = main(["download", "-n", "s3://bucket/data", "--local", str(tmp_path / "dst")])
 

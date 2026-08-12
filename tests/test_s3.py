@@ -224,9 +224,7 @@ class TestUpload:
         # The directory marker should be deleted with trailing slash
         delete_calls = mock_s3.delete_object.call_args_list
         deleted_keys = [call[1]["Key"] for call in delete_calls]
-        assert "output/subdir/" in deleted_keys, (
-            f"Expected delete of 'output/subdir/' but got: {deleted_keys}"
-        )
+        assert "output/subdir/" in deleted_keys, f"Expected delete of 'output/subdir/' but got: {deleted_keys}"
 
     @patch(BOTO3_PATCH_TARGET)
     def test_background_sync_uploads_repeatedly(self, mock_boto_client):
@@ -767,9 +765,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False) as _:
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_download(
-                    "s3://bucket/data", local=str(local_dir)
-                )
+                plan = _require_active_mirror().plan_download("s3://bucket/data", local=str(local_dir))
 
         sources = [src for src, _ in plan.to_copy]
         assert "s3://bucket/data/file.txt" in sources
@@ -794,9 +790,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_download(
-                    "s3://bucket/data", local=str(local_dir)
-                )
+                plan = _require_active_mirror().plan_download("s3://bucket/data", local=str(local_dir))
 
             # Dry-plan is read-only.
             assert orphan.exists()
@@ -815,9 +809,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_upload(
-                    "s3://bucket/data", local=str(src)
-                )
+                plan = _require_active_mirror().plan_upload("s3://bucket/data", local=str(src))
 
         destinations = [dst for _, dst in plan.to_copy]
         assert destinations == ["s3://bucket/data/file.txt"]
@@ -851,9 +843,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_download(
-                    "s3://bucket/data/", local=str(local_dir)
-                )
+                plan = _require_active_mirror().plan_download("s3://bucket/data/", local=str(local_dir))
 
         sources = [src for src, _ in plan.to_copy]
         assert sources == ["s3://bucket/data/file.txt"]
@@ -878,9 +868,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_download(
-                    "s3://bucket/data/", local=str(Path(tmpdir) / "dst")
-                )
+                plan = _require_active_mirror().plan_download("s3://bucket/data/", local=str(Path(tmpdir) / "dst"))
 
         sources = [src for src, _ in plan.to_copy]
         assert sources == ["s3://bucket/data/file.txt"]
@@ -898,9 +886,7 @@ class TestPlan:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_upload(
-                    "s3://bucket/data/", local=str(src)
-                )
+                plan = _require_active_mirror().plan_upload("s3://bucket/data/", local=str(src))
 
         destinations = [dst for _, dst in plan.to_copy]
         assert destinations == ["s3://bucket/data/file.txt"]
@@ -922,9 +908,7 @@ class TestTrailingSlashRealTransfers:
         mock_s3.head_object.return_value = {"ContentLength": 100}
         mock_paginator = Mock()
         mock_s3.get_paginator.return_value = mock_paginator
-        mock_paginator.paginate.return_value = [
-            {"Contents": [{"Key": "data/file.txt", "Size": 5}]}
-        ]
+        mock_paginator.paginate.return_value = [{"Contents": [{"Key": "data/file.txt", "Size": 5}]}]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             local = Path(tmpdir) / "dst"
@@ -945,9 +929,7 @@ class TestTrailingSlashRealTransfers:
         mock_s3.head_object.return_value = {"ContentLength": 100}
         mock_paginator = Mock()
         mock_s3.get_paginator.return_value = mock_paginator
-        mock_paginator.paginate.return_value = [
-            {"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}
-        ]
+        mock_paginator.paginate.return_value = [{"Contents": [{"Key": "data/orphan.txt", "Size": 5}]}]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "src"
@@ -983,9 +965,7 @@ class TestTrailingSlashRealTransfers:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 from pos3 import _require_active_mirror
 
-                plan = _require_active_mirror().plan_upload(
-                    "s3://bucket/data", local=str(missing)
-                )
+                plan = _require_active_mirror().plan_upload("s3://bucket/data", local=str(missing))
 
         assert plan.to_copy == []
         assert plan.to_delete == []
@@ -1070,9 +1050,7 @@ class TestFinalSyncPreservesOriginalException:
         # _scan_s3 → _list_s3_objects calls head_object first. A 403 here
         # propagates through the scan iterator, not through a worker future,
         # so the previous TransferError-only catch would have unmasked it.
-        mock_s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
-        )
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
 
         class AppError(Exception):
             pass
@@ -1368,9 +1346,9 @@ class TestPrefixBoundaryMatching:
                 paginator_calls = mock_s3.get_paginator.return_value.paginate.call_args_list
                 assert len(paginator_calls) == 1
                 call_kwargs = paginator_calls[0][1]
-                assert (
-                    call_kwargs["Prefix"] == "data/"
-                ), f"Expected Prefix='data/' but got Prefix='{call_kwargs['Prefix']}'"
+                assert call_kwargs["Prefix"] == "data/", (
+                    f"Expected Prefix='data/' but got Prefix='{call_kwargs['Prefix']}'"
+                )
 
     @patch(BOTO3_PATCH_TARGET)
     def test_prefix_boundary_with_trailing_slash(self, mock_boto_client):
@@ -1922,3 +1900,43 @@ class TestProfileRegistry:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 with pytest.raises(ValueError, match="Unknown profile"):
                     s3.download("s3://ghost@bucket/data")
+
+
+class TestSkipDirsContaining:
+    """A directory is kept out of an upload by what is INSIDE it, which no glob can say."""
+
+    def test_scan_skips_a_marked_directory_and_its_subtree(self, tmp_path):
+        from pos3 import _scan_local
+
+        (tmp_path / "done" / "inner").mkdir(parents=True)
+        (tmp_path / "done" / "inner" / "a.bin").write_text("a")
+        (tmp_path / "open").mkdir()
+        (tmp_path / "open" / ".unfinished").write_text("")
+        (tmp_path / "open" / "b.bin").write_text("b")
+
+        seen = {i.relative_path for i in _scan_local(tmp_path, [".unfinished"])}
+
+        assert "done/inner/a.bin" in seen
+        assert not any(p.startswith("open") for p in seen)
+
+    def test_scan_keeps_everything_when_no_marker_is_named(self, tmp_path):
+        from pos3 import _scan_local
+
+        (tmp_path / "open").mkdir()
+        (tmp_path / "open" / ".unfinished").write_text("")
+
+        seen = {i.relative_path for i in _scan_local(tmp_path)}
+
+        assert "open" in seen and "open/.unfinished" in seen
+
+    def test_a_directory_that_loses_its_marker_is_scanned_again(self, tmp_path):
+        from pos3 import _scan_local
+
+        (tmp_path / "ep").mkdir()
+        marker = tmp_path / "ep" / ".unfinished"
+        marker.write_text("")
+        (tmp_path / "ep" / "a.bin").write_text("a")
+
+        assert not any(i.relative_path.startswith("ep") for i in _scan_local(tmp_path, [".unfinished"]))
+        marker.unlink()
+        assert "ep/a.bin" in {i.relative_path for i in _scan_local(tmp_path, [".unfinished"])}

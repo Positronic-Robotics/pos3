@@ -189,8 +189,7 @@ def _load_profile_registry(path: Path | None = None, force: bool = False) -> Non
             # Build all profiles first so a malformed entry doesn't leave the
             # registry half-loaded with a sticky _REGISTRY_LOADED flag.
             new_profiles = {
-                name: _profile_from_config(name, cfg, registry_path)
-                for name, cfg in data.get("profiles", {}).items()
+                name: _profile_from_config(name, cfg, registry_path) for name, cfg in data.get("profiles", {}).items()
             }
         else:
             new_profiles = {}
@@ -245,8 +244,7 @@ def _url_profile(s3_url: str) -> str | None:
         return None
     if not parsed.username:
         raise ValueError(
-            f"Empty profile selector in S3 URL: {s3_url!r}. "
-            "Use s3://<profile>@bucket/key or omit the '@'."
+            f"Empty profile selector in S3 URL: {s3_url!r}. Use s3://<profile>@bucket/key or omit the '@'."
         )
     return parsed.username
 

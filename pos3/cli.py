@@ -209,9 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     # because they can't see the flags the subcommand actually exposes.
     namespace, leftover = parser.parse_known_args(argv)
     if leftover:
-        subparsers_action = next(
-            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-        )
+        subparsers_action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
         sub = subparsers_action.choices.get(namespace.command, parser)
         sub.error(f"unrecognized arguments: {' '.join(leftover)}")
     args = namespace

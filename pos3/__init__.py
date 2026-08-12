@@ -141,7 +141,14 @@ class FileInfo:
     is_dir: bool  # True if this represents a directory
 
 
-def _scan_local(path: Path) -> Iterator[FileInfo]:
+def _scan_local(path: Path, skip_dirs_containing: list[str] | None = None) -> Iterator[FileInfo]:
+    """Walk `path`, yielding every directory before its children.
+
+    `skip_dirs_containing` names files that mark a directory as not-to-be-copied: a directory
+    holding one is skipped with its whole subtree, and the writer that put the marker there is
+    what decides. A glob cannot express this — the mark is in the directory's CONTENTS, not in
+    its path — which is why it is a scan-time rule rather than an `exclude` pattern.
+    """
     if not path.exists():
         return
 
@@ -155,6 +162,8 @@ def _scan_local(path: Path) -> Iterator[FileInfo]:
 
         relative = p.relative_to(base).as_posix() if p != base else ""
         if p.is_dir():
+            if skip_dirs_containing and any((p / marker).exists() for marker in skip_dirs_containing):
+                continue
             # Always yield directories, including the root (relative_path='')
             yield FileInfo(relative_path=relative, size=0, is_dir=True)
             stack.extend(p.iterdir())
@@ -261,6 +270,7 @@ class _UploadRegistration:
     sync_on_error: bool
     exclude: list[str] | None
     profile: Profile | None = None
+    skip_dirs_containing: list[str] | None = None
     last_sync: float = 0.0
     # The user's original URL, preserving trailing-slash intent. _sync_uploads
     # parses it raw so `s3://bucket/data/` skips head_object('data') in
@@ -279,6 +289,7 @@ class _UploadRegistration:
             and self.sync_on_error == other.sync_on_error
             and self.exclude == other.exclude
             and self.profile == other.profile
+            and self.skip_dirs_containing == other.skip_dirs_containing
         )
 
 
@@ -431,6 +442,7 @@ class _Mirror:
         sync_on_error,
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
+        skip_dirs_containing: list[str] | None = None,
     ) -> Path:
         """
         Register (and perform if needed) an upload from a local directory or file to a remote S3 bucket path.
@@ -443,6 +455,8 @@ class _Mirror:
             sync_on_error (bool): If True, attempts to sync files even when encountering errors.
             exclude (list[str] | None): List of glob patterns to exclude from upload.
             profile: S3 profile name or Profile config for custom endpoints.
+            skip_dirs_containing (list[str] | None): Filenames that mark a local directory as
+                not-to-be-uploaded; one holding any of them is skipped with its subtree.
 
         Returns:
             Path: The canonical local path associated with this upload registration.
@@ -474,6 +488,7 @@ class _Mirror:
             sync_on_error=sync_on_error,
             exclude=exclude,
             profile=effective_profile,
+            skip_dirs_containing=skip_dirs_containing,
             last_sync=0,
             raw_remote=remote,
         )
@@ -606,6 +621,7 @@ class _Mirror:
         sync_on_error: bool,
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
+        skip_dirs_containing: list[str] | None = None,
     ) -> Path:
         # Let download() and upload() handle profile resolution and normalization
         local_path = self.download(remote, local, delete_local, exclude, profile)
@@ -616,7 +632,9 @@ class _Mirror:
         effective_profile = self._effective_profile(profile, remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop((normalized, effective_profile), None)
-        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile)
+        return self.upload(
+            remote, local_path, interval, delete_remote, sync_on_error, exclude, profile, skip_dirs_containing
+        )
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
@@ -743,7 +761,7 @@ class _Mirror:
             self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
-        tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []
+        tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None, list[str] | None]] = []
         for registration in registrations:
             if registration.local_path.exists():
                 tasks.append(
@@ -757,6 +775,7 @@ class _Mirror:
                         registration.delete,
                         registration.exclude,
                         registration.profile,
+                        registration.skip_dirs_containing,
                     )
                 )
 
@@ -767,12 +786,12 @@ class _Mirror:
         to_remove: list[tuple[str, str, Profile | None]] = []
         total_bytes = 0
 
-        for remote, local_path, delete, exclude, profile in tasks:
+        for remote, local_path, delete, exclude, profile, skip_dirs_containing in tasks:
             logger.debug("Syncing upload: %s from %s (delete=%s)", remote, local_path, delete)
             scan_bucket, scan_prefix = _parse_s3_url(remote)
             bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
             to_copy, to_delete = _compute_sync_diff(
-                _filter_fileinfo(_scan_local(local_path), exclude),
+                _filter_fileinfo(_scan_local(local_path, skip_dirs_containing), exclude),
                 _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
             )
 
@@ -1118,6 +1137,7 @@ def upload(
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
+    skip_dirs_containing: list[str] | None = None,
 ) -> Path:
     """
     Register a local path for upload. Uploads on exit and optionally in background.
@@ -1129,12 +1149,15 @@ def upload(
         delete: If True (default), deletes S3 files NOT present locally.
         sync_on_error: If True, syncs even if the context exits with an exception.
         profile: S3 profile name or Profile config for custom endpoints.
+        skip_dirs_containing: Filenames marking a local directory as not-to-be-uploaded; a
+            directory holding any of them is skipped with its subtree, so a writer can keep its
+            half-written output out of the destination by leaving a marker in it.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude, profile)
+    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude, profile, skip_dirs_containing)
 
 
 def sync(
@@ -1146,6 +1169,7 @@ def sync(
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
+    skip_dirs_containing: list[str] | None = None,
 ) -> Path:
     """
     Bi-directional helper. Performs download() then registers upload().
@@ -1154,12 +1178,25 @@ def sync(
         delete_local: Cleanup local files during download.
         delete_remote: Cleanup remote files during upload.
         profile: S3 profile name or Profile config for custom endpoints.
+        skip_dirs_containing: Filenames marking a local directory as not-to-be-uploaded. Applies to
+            the upload half only — a directory the destination already holds is not deleted there
+            for gaining a marker, and one that loses its marker uploads on the next pass.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile)
+    return mirror_obj.sync(
+        remote,
+        local,
+        interval,
+        delete_local,
+        delete_remote,
+        sync_on_error,
+        exclude,
+        profile,
+        skip_dirs_containing,
+    )
 
 
 def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:

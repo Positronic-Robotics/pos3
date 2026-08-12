@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0] - 2026-08-12
+
+### Added
+- `skip_dirs_containing` on `upload()` and `sync()`: filenames that mark a local directory as
+  not-to-be-uploaded. A directory holding one is skipped with its whole subtree, so a writer keeps
+  its half-written output out of the destination by leaving a marker in it.
+  - Expresses what `exclude` cannot: `exclude` matches glob patterns against a path, and "a
+    directory that contains `.unfinished`" is a fact about the directory's CONTENTS.
+  - Upload half only. A directory the destination already holds is not deleted there for gaining a
+    marker; one that loses its marker uploads on the next pass.
+
 ## [0.3.1] - 2026-05-21
 
 ### Added
