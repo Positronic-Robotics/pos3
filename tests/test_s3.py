@@ -1932,6 +1932,9 @@ class TestMtimeComparison:
     """
 
     NOW = 1_700_000_000.0
+    TOL = s3._MTIME_TOLERANCE_SECONDS
+    # An offset that is unambiguously "newer" no matter how the tolerance is tuned.
+    WELL_OVER = 10 * s3._MTIME_TOLERANCE_SECONDS
 
     def _pair(self, src_mtime, tgt_mtime, size=5):
         src = [s3.FileInfo("", 0, True), s3.FileInfo("f.bin", size, False, mtime=src_mtime)]
@@ -1939,32 +1942,37 @@ class TestMtimeComparison:
         return iter(src), iter(tgt)
 
     def test_same_size_source_newer_is_copied(self):
-        to_copy, to_delete = s3._compute_sync_diff(*self._pair(self.NOW + 10, self.NOW))
+        to_copy, to_delete = s3._compute_sync_diff(*self._pair(self.NOW + self.WELL_OVER, self.NOW))
         assert [i.relative_path for i in to_copy] == ["f.bin"]
         assert to_delete == []
 
     def test_same_size_source_older_is_not_copied(self):
-        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW, self.NOW + 10))
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW, self.NOW + self.WELL_OVER))
         assert to_copy == []
 
     def test_same_size_within_tolerance_is_not_copied(self):
-        # S3 LastModified is whole-second; a local file uploaded at x.7s must
-        # not look "newer" than its S3 twin stamped at x.0s.
-        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + 0.7, self.NOW))
+        # S3 LastModified is whole-second; a local file uploaded a fraction of
+        # a second after its S3 twin's stamp must not look "newer".
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + 0.7 * self.TOL, self.NOW))
+        assert to_copy == []
+
+    def test_same_size_exactly_at_tolerance_is_not_copied(self):
+        # The comparison is strict: a source ahead by exactly the tolerance is not newer.
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + self.TOL, self.NOW))
         assert to_copy == []
 
     def test_same_size_just_over_tolerance_is_copied(self):
-        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + 1.01, self.NOW))
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + self.TOL + 0.01, self.NOW))
         assert [i.relative_path for i in to_copy] == ["f.bin"]
 
     def test_missing_mtime_falls_back_to_size_only(self):
-        assert s3._compute_sync_diff(*self._pair(self.NOW + 10, None))[0] == []
+        assert s3._compute_sync_diff(*self._pair(self.NOW + self.WELL_OVER, None))[0] == []
         assert s3._compute_sync_diff(*self._pair(None, self.NOW))[0] == []
         assert s3._compute_sync_diff(*self._pair(None, None))[0] == []
 
     def test_size_difference_still_wins_regardless_of_mtime(self):
         src = iter([s3.FileInfo("f.bin", 6, False, mtime=self.NOW)])
-        tgt = iter([s3.FileInfo("f.bin", 5, False, mtime=self.NOW + 100)])
+        tgt = iter([s3.FileInfo("f.bin", 5, False, mtime=self.NOW + self.WELL_OVER)])
         to_copy, _ = s3._compute_sync_diff(src, tgt)
         assert [i.relative_path for i in to_copy] == ["f.bin"]
 
@@ -2011,7 +2019,7 @@ class TestMtimeComparison:
             local_dir.mkdir()
             f = local_dir / "ckpt.bin"
             f.write_bytes(b"NEW!!")  # same size as S3
-            os.utime(f, (self.NOW + 60, self.NOW + 60))
+            os.utime(f, (self.NOW + self.WELL_OVER, self.NOW + self.WELL_OVER))
 
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 s3.upload("s3://bucket/out", local=local_dir, interval=None, delete=False)
@@ -2023,7 +2031,7 @@ class TestMtimeComparison:
     def test_upload_same_size_local_not_newer_is_skipped(self, mock_boto_client):
         from datetime import datetime, timezone
 
-        stamp = datetime.fromtimestamp(self.NOW + 60, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(self.NOW + self.WELL_OVER, tz=timezone.utc)
         paginate = [{"Contents": [{"Key": "out/ckpt.bin", "Size": 5, "LastModified": stamp}]}]
         mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
 
@@ -2043,7 +2051,7 @@ class TestMtimeComparison:
     def test_download_same_size_but_newer_remote_refreshes_and_stamps_mtime(self, mock_boto_client):
         from datetime import datetime, timezone
 
-        stamp = datetime.fromtimestamp(self.NOW + 60, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(self.NOW + self.WELL_OVER, tz=timezone.utc)
         paginate = [{"Contents": [{"Key": "data/f.txt", "Size": 5, "LastModified": stamp}]}]
         mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
 
@@ -2065,7 +2073,7 @@ class TestMtimeComparison:
             assert mock_s3.download_file.call_count == 1
             assert f.read_bytes() == b"fresh"
             # Local copy carries the S3 LastModified, not "now".
-            assert f.stat().st_mtime == pytest.approx(self.NOW + 60, abs=1.0)
+            assert f.stat().st_mtime == pytest.approx(self.NOW + self.WELL_OVER, abs=1.0)
 
     @patch(BOTO3_PATCH_TARGET)
     def test_download_same_size_remote_not_newer_is_skipped(self, mock_boto_client):
@@ -2080,7 +2088,7 @@ class TestMtimeComparison:
             local_dir.mkdir()
             f = local_dir / "f.txt"
             f.write_bytes(b"12345")
-            os.utime(f, (self.NOW + 60, self.NOW + 60))
+            os.utime(f, (self.NOW + self.WELL_OVER, self.NOW + self.WELL_OVER))
 
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 s3.download("s3://bucket/data", local=local_dir)
@@ -2122,7 +2130,7 @@ class TestMtimeComparison:
             local_dir.mkdir()
             f = local_dir / "ckpt.bin"
             f.write_bytes(b"NEW!!")
-            os.utime(f, (self.NOW + 60, self.NOW + 60))
+            os.utime(f, (self.NOW + self.WELL_OVER, self.NOW + self.WELL_OVER))
 
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 plan = s3.plan_upload("s3://bucket/out", local=local_dir)
