@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 import time
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -139,6 +141,28 @@ class FileInfo:
     relative_path: str  # Relative path from root (empty string for root file/dir)
     size: int  # File size in bytes, 0 for directories
     is_dir: bool  # True if this represents a directory
+    # Last-modification time as a POSIX timestamp (UTC seconds). ``None`` for
+    # directories and for backends that do not report one; the diff then
+    # falls back to size-only comparison for that entry.
+    mtime: float | None = None
+
+
+# S3 reports ``LastModified`` at whole-second resolution, while local
+# filesystems keep sub-second mtimes. Immediately after an upload the local
+# file can therefore look "newer" than its S3 twin by a fraction of a second.
+# Treat a source as newer only when it is ahead by more than this margin, so
+# a freshly synced tree does not re-transfer on every tick.
+_MTIME_TOLERANCE_SECONDS = 2.0
+
+
+def _s3_mtime(obj: dict) -> float | None:
+    """Extract a POSIX timestamp from an S3 object's ``LastModified``, if present."""
+    last_modified = obj.get("LastModified")
+    if isinstance(last_modified, datetime):
+        return last_modified.timestamp()
+    if isinstance(last_modified, (int, float)):
+        return float(last_modified)
+    return None
 
 
 def _scan_local(path: Path) -> Iterator[FileInfo]:
@@ -159,7 +183,8 @@ def _scan_local(path: Path) -> Iterator[FileInfo]:
             yield FileInfo(relative_path=relative, size=0, is_dir=True)
             stack.extend(p.iterdir())
         else:
-            yield FileInfo(relative_path=relative, size=p.stat().st_size, is_dir=False)
+            st = p.stat()
+            yield FileInfo(relative_path=relative, size=st.st_size, is_dir=False, mtime=st.st_mtime)
 
 
 def _filter_fileinfo(fileinfo_iter: Iterator[FileInfo], exclude: list[str] | None) -> Iterator[FileInfo]:
@@ -192,7 +217,26 @@ def _filter_fileinfo(fileinfo_iter: Iterator[FileInfo], exclude: list[str] | Non
             yield info
 
 
+def _is_newer(source: FileInfo, target: FileInfo) -> bool:
+    """True when ``source`` was modified after ``target`` beyond the S3 rounding tolerance.
+
+    Unknown timestamps on either side never count as "newer" -- the caller
+    falls back to size comparison in that case.
+    """
+    if source.mtime is None or target.mtime is None:
+        return False
+    return source.mtime > target.mtime + _MTIME_TOLERANCE_SECONDS
+
+
 def _compute_sync_diff(source: Iterator[FileInfo], target: Iterator[FileInfo]) -> tuple[list[FileInfo], list[FileInfo]]:
+    """Return ``(to_copy, to_delete)`` to make ``target`` mirror ``source``.
+
+    A file is copied when it is missing on the target, differs in size, or
+    when the source's modification time is newer than the target's. The
+    mtime check is what catches an in-place edit that
+    leaves the byte count unchanged (a rewritten checkpoint, a fixed-shape
+    array, a same-length text edit); size alone cannot see it.
+    """
     source_map: dict[str, FileInfo] = {info.relative_path: info for info in source}
     target_map: dict[str, FileInfo] = {info.relative_path: info for info in target}
 
@@ -206,7 +250,11 @@ def _compute_sync_diff(source: Iterator[FileInfo], target: Iterator[FileInfo]) -
         elif source_info.is_dir != target_info.is_dir:
             to_delete.append(target_info)
             to_copy.append(source_info)
-        elif not source_info.is_dir and source_info.size != target_info.size:
+        elif source_info.is_dir:
+            continue
+        elif source_info.size != target_info.size:
+            to_copy.append(source_info)
+        elif _is_newer(source_info, target_info):
             to_copy.append(source_info)
 
     for relative_path, target_info in target_map.items():
@@ -929,7 +977,7 @@ class _Mirror:
             else:
                 if relative == "":
                     has_root_file = True
-                yield FileInfo(relative_path=relative, size=obj["Size"], is_dir=False)
+                yield FileInfo(relative_path=relative, size=obj["Size"], is_dir=False, mtime=_s3_mtime(obj))
 
                 if "/" in relative:
                     parts = relative.split("/")
@@ -982,6 +1030,16 @@ class _Mirror:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 client = self._get_client(profile)
                 client.download_file(bucket, key, str(target), Callback=pbar.update)
+                # Stamp the local copy with the S3 LastModified time (rsync -t
+                # style). Without this the fresh download carries "now" as
+                # its mtime, so a following upload of the same tree (sync())
+                # would see every local file as newer and re-upload it all.
+                # With it, the local file is newer only after a real edit.
+                if info.mtime is not None:
+                    try:
+                        os.utime(target, (info.mtime, info.mtime))
+                    except OSError as exc:
+                        logger.warning("Could not set mtime on %s: %s", target, exc)
         except Exception as exc:
             logger.error("Failed to put %s locally: %s", key, exc)
             raise

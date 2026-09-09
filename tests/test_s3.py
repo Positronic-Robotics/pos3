@@ -1922,3 +1922,209 @@ class TestProfileRegistry:
             with s3.mirror(cache_root=tmpdir, show_progress=False):
                 with pytest.raises(ValueError, match="Unknown profile"):
                     s3.download("s3://ghost@bucket/data")
+
+
+class TestMtimeComparison:
+    """Size-plus-mtime change detection.
+
+    Regression coverage for the case size-only comparison cannot see: a
+    file rewritten in place with the same byte count.
+    """
+
+    NOW = 1_700_000_000.0
+
+    def _pair(self, src_mtime, tgt_mtime, size=5):
+        src = [s3.FileInfo("", 0, True), s3.FileInfo("f.bin", size, False, mtime=src_mtime)]
+        tgt = [s3.FileInfo("", 0, True), s3.FileInfo("f.bin", size, False, mtime=tgt_mtime)]
+        return iter(src), iter(tgt)
+
+    def test_same_size_source_newer_is_copied(self):
+        to_copy, to_delete = s3._compute_sync_diff(*self._pair(self.NOW + 10, self.NOW))
+        assert [i.relative_path for i in to_copy] == ["f.bin"]
+        assert to_delete == []
+
+    def test_same_size_source_older_is_not_copied(self):
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW, self.NOW + 10))
+        assert to_copy == []
+
+    def test_same_size_within_tolerance_is_not_copied(self):
+        # S3 LastModified is whole-second; a local file uploaded at x.7s must
+        # not look "newer" than its S3 twin stamped at x.0s.
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + 0.7, self.NOW))
+        assert to_copy == []
+
+    def test_same_size_just_over_tolerance_is_copied(self):
+        to_copy, _ = s3._compute_sync_diff(*self._pair(self.NOW + 1.01, self.NOW))
+        assert [i.relative_path for i in to_copy] == ["f.bin"]
+
+    def test_missing_mtime_falls_back_to_size_only(self):
+        assert s3._compute_sync_diff(*self._pair(self.NOW + 10, None))[0] == []
+        assert s3._compute_sync_diff(*self._pair(None, self.NOW))[0] == []
+        assert s3._compute_sync_diff(*self._pair(None, None))[0] == []
+
+    def test_size_difference_still_wins_regardless_of_mtime(self):
+        src = iter([s3.FileInfo("f.bin", 6, False, mtime=self.NOW)])
+        tgt = iter([s3.FileInfo("f.bin", 5, False, mtime=self.NOW + 100)])
+        to_copy, _ = s3._compute_sync_diff(src, tgt)
+        assert [i.relative_path for i in to_copy] == ["f.bin"]
+
+    def test_scan_local_reports_mtime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / "a.txt"
+            f.write_bytes(b"12345")
+            os.utime(f, (self.NOW, self.NOW))
+            infos = {i.relative_path: i for i in s3._scan_local(Path(tmpdir))}
+            assert infos[""].mtime is None  # directories carry no mtime
+            assert infos["a.txt"].mtime == pytest.approx(self.NOW, abs=1.0)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_scan_s3_parses_last_modified(self, mock_boto_client):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW, tz=timezone.utc)
+        paginate = [
+            {
+                "Contents": [
+                    {"Key": "data/with.txt", "Size": 5, "LastModified": stamp},
+                    {"Key": "data/without.txt", "Size": 5},
+                ]
+            }
+        ]
+        _setup_s3_mock(mock_boto_client, paginate)
+        with s3.mirror(show_progress=False):
+            mirror_obj = s3._require_active_mirror()
+            infos = {i.relative_path: i for i in mirror_obj._scan_s3("bucket", "data")}
+        assert infos["with.txt"].mtime == pytest.approx(self.NOW)
+        assert infos["without.txt"].mtime is None
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_same_size_but_newer_local_file(self, mock_boto_client):
+        """The headline bug: an in-place edit that keeps the size must upload."""
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "out/ckpt.bin", "Size": 5, "LastModified": stamp}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "out"
+            local_dir.mkdir()
+            f = local_dir / "ckpt.bin"
+            f.write_bytes(b"NEW!!")  # same size as S3
+            os.utime(f, (self.NOW + 60, self.NOW + 60))
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload("s3://bucket/out", local=local_dir, interval=None, delete=False)
+
+            assert mock_s3.upload_file.call_count == 1
+            assert "ckpt.bin" in str(mock_s3.upload_file.call_args[0][0])
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_upload_same_size_local_not_newer_is_skipped(self, mock_boto_client):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW + 60, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "out/ckpt.bin", "Size": 5, "LastModified": stamp}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "out"
+            local_dir.mkdir()
+            f = local_dir / "ckpt.bin"
+            f.write_bytes(b"12345")
+            os.utime(f, (self.NOW, self.NOW))
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.upload("s3://bucket/out", local=local_dir, interval=None, delete=False)
+
+            assert mock_s3.upload_file.call_count == 0
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_same_size_but_newer_remote_refreshes_and_stamps_mtime(self, mock_boto_client):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW + 60, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "data/f.txt", "Size": 5, "LastModified": stamp}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        def fake_download(bucket, key, filename, Callback=None):
+            Path(filename).write_bytes(b"fresh")
+
+        mock_s3.download_file.side_effect = fake_download
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "data"
+            local_dir.mkdir()
+            f = local_dir / "f.txt"
+            f.write_bytes(b"stale")  # same size as S3
+            os.utime(f, (self.NOW, self.NOW))
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/data", local=local_dir)
+
+            assert mock_s3.download_file.call_count == 1
+            assert f.read_bytes() == b"fresh"
+            # Local copy carries the S3 LastModified, not "now".
+            assert f.stat().st_mtime == pytest.approx(self.NOW + 60, abs=1.0)
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_download_same_size_remote_not_newer_is_skipped(self, mock_boto_client):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "data/f.txt", "Size": 5, "LastModified": stamp}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "data"
+            local_dir.mkdir()
+            f = local_dir / "f.txt"
+            f.write_bytes(b"12345")
+            os.utime(f, (self.NOW + 60, self.NOW + 60))
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.download("s3://bucket/data", local=local_dir)
+
+            assert mock_s3.download_file.call_count == 0
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_sync_does_not_reupload_what_it_just_downloaded(self, mock_boto_client):
+        """Downloaded files inherit the S3 timestamp, so the upload leg is a no-op."""
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "data/f.txt", "Size": 5, "LastModified": stamp}]}]
+        mock_s3 = _setup_s3_mock(mock_boto_client, paginate)
+
+        def fake_download(bucket, key, filename, Callback=None):
+            Path(filename).write_bytes(b"12345")
+
+        mock_s3.download_file.side_effect = fake_download
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "data"
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                s3.sync("s3://bucket/data", local=local_dir, interval=None)
+
+            assert mock_s3.download_file.call_count == 1
+            assert mock_s3.upload_file.call_count == 0
+
+    @patch(BOTO3_PATCH_TARGET)
+    def test_plan_upload_reports_same_size_newer_file(self, mock_boto_client):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.NOW, tz=timezone.utc)
+        paginate = [{"Contents": [{"Key": "out/ckpt.bin", "Size": 5, "LastModified": stamp}]}]
+        _setup_s3_mock(mock_boto_client, paginate)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_dir = Path(tmpdir) / "out"
+            local_dir.mkdir()
+            f = local_dir / "ckpt.bin"
+            f.write_bytes(b"NEW!!")
+            os.utime(f, (self.NOW + 60, self.NOW + 60))
+
+            with s3.mirror(cache_root=tmpdir, show_progress=False):
+                plan = s3.plan_upload("s3://bucket/out", local=local_dir)
+
+            assert [dst for _, dst in plan.to_copy] == ["s3://bucket/out/ckpt.bin"]

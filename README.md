@@ -12,7 +12,7 @@
     - **Enter**: Initializes the sync environment (threads, cache).
     - **Body**: You explicitly call `pos3.download()` to fetch files and `pos3.upload()` to register outputs.
     - **Exit**: Uploads registered output paths (mirroring local to S3).
-- **Lazy & Efficient**: Only transfers files that have changed (based on size/presence).
+- **Lazy & Efficient**: Only transfers files that have changed (based on size/presence/timestamp).
 - **Local Paths**: All API calls return a `pathlib.Path` to the local file/directory. If you pass a local path instead of an S3 URL, it is passed through unchanged (no copy).
 - **Background Sync**: Can optionally upload changes in the background (e.g., every 60s) for long-running jobs.
 

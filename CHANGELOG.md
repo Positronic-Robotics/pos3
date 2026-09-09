@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Change detection now compares modification time in addition to size, so a
+  file rewritten in place with the same byte count (an overwritten
+  checkpoint, a fixed-shape array, a same-length text edit) is transferred
+  instead of being silently skipped. Applies to `download`, `upload`,
+  `sync`, the background interval loop, `plan_*`, and the CLI dry-run.
+  Rule: copy when missing, size differs, or the source is newer than the
+  target by more than 1 s (S3 `LastModified` is whole-second).
+
+### Added
+- `FileInfo.mtime` (POSIX timestamp, `None` for directories or when the
+  backend reports none; falls back to size-only for that entry).
+
+### Changed
+- Downloaded files are stamped with the S3 `LastModified` time (rsync `-t`
+  style), so a `sync()` does not re-upload the tree it just downloaded.
+
 ## [0.3.1] - 2026-05-21
 
 ### Added
