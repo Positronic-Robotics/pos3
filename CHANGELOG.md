@@ -1,15 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-- Change detection now compares modification time in addition to size, so a
-  file rewritten in place with the same byte count (an overwritten
-  checkpoint, a fixed-shape array, a same-length text edit) is transferred
-  instead of being silently skipped. Applies to `download`, `upload`,
-  `sync`, the background interval loop, `plan_*`, and the CLI dry-run.
-  Rule: copy when missing, size differs, or the source is newer than the
-  target by more than 1 s (S3 `LastModified` is whole-second).
+## [0.3.2] - 2026-09-10
 
 ### Added
 - `FileInfo.mtime` (POSIX timestamp, `None` for directories or when the
@@ -18,6 +9,20 @@
 ### Changed
 - Downloaded files are stamped with the S3 `LastModified` time (rsync `-t`
   style), so a `sync()` does not re-upload the tree it just downloaded.
+- **Upgrade note:** files downloaded by pos3 0.3.1 or earlier carry their
+  download time as mtime, which is newer than the S3 `LastModified`. The
+  first `upload()` / `sync()` of such a tree after upgrading will therefore
+  re-upload it once; subsequent syncs are incremental again.
+
+### Fixed
+- Change detection now compares modification time in addition to size, so a
+  file rewritten in place with the same byte count (an overwritten
+  checkpoint, a fixed-shape array, a same-length text edit) is transferred
+  instead of being silently skipped. Applies to `download`, `upload`,
+  `sync`, the background interval loop, `plan_*`, and the CLI dry-run.
+  Rule: copy when missing, size differs, or the source is newer than the
+  target by more than 2 s (`_MTIME_TOLERANCE_SECONDS`; S3 `LastModified` is
+  whole-second, so a small margin keeps freshly synced trees stable).
 
 ## [0.3.1] - 2026-05-21
 
