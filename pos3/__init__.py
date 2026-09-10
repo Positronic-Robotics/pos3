@@ -218,25 +218,14 @@ def _filter_fileinfo(fileinfo_iter: Iterator[FileInfo], exclude: list[str] | Non
 
 
 def _is_newer(source: FileInfo, target: FileInfo) -> bool:
-    """True when ``source`` was modified after ``target`` beyond the S3 rounding tolerance.
-
-    Unknown timestamps on either side never count as "newer" -- the caller
-    falls back to size comparison in that case.
-    """
+    """True if ``source`` is newer than ``target`` beyond the tolerance; False if either mtime is unknown."""
     if source.mtime is None or target.mtime is None:
         return False
     return source.mtime > target.mtime + _MTIME_TOLERANCE_SECONDS
 
 
 def _compute_sync_diff(source: Iterator[FileInfo], target: Iterator[FileInfo]) -> tuple[list[FileInfo], list[FileInfo]]:
-    """Return ``(to_copy, to_delete)`` to make ``target`` mirror ``source``.
-
-    A file is copied when it is missing on the target, differs in size, or
-    when the source's modification time is newer than the target's. The
-    mtime check is what catches an in-place edit that
-    leaves the byte count unchanged (a rewritten checkpoint, a fixed-shape
-    array, a same-length text edit); size alone cannot see it.
-    """
+    """Return ``(to_copy, to_delete)``; copy files that are missing, differ in size, or are newer on the source."""
     source_map: dict[str, FileInfo] = {info.relative_path: info for info in source}
     target_map: dict[str, FileInfo] = {info.relative_path: info for info in target}
 
