@@ -245,40 +245,6 @@ class TestUpload:
         assert mock_s3.upload_file.call_count >= 2
 
     @patch(BOTO3_PATCH_TARGET)
-    def test_request_upload_syncs_before_the_interval(self, mock_boto_client):
-        mock_s3 = _setup_s3_mock(mock_boto_client)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "output"
-            output.mkdir()
-            (output / "data.txt").write_text("content")
-
-            with s3.mirror(cache_root=tmpdir, show_progress=False):
-                s3.upload("s3://bucket/output", local=output, interval=3600)
-                s3.request_upload()
-                time.sleep(2.5)
-                uploads_before_exit = mock_s3.upload_file.call_count
-
-        assert uploads_before_exit == 1
-
-    @patch(BOTO3_PATCH_TARGET)
-    def test_request_upload_reaches_an_exit_only_registration(self, mock_boto_client):
-        mock_s3 = _setup_s3_mock(mock_boto_client)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "output"
-            output.mkdir()
-            (output / "data.txt").write_text("content")
-
-            with s3.mirror(cache_root=tmpdir, show_progress=False):
-                s3.upload("s3://bucket/output", local=output, interval=None)
-                s3.request_upload()
-                time.sleep(2.5)
-                uploads_before_exit = mock_s3.upload_file.call_count
-
-        assert uploads_before_exit == 1
-
-    @patch(BOTO3_PATCH_TARGET)
     def test_final_sync_waits_for_a_background_sync_past_the_join_timeout(self, mock_boto_client):
         """The stop joins the worker for 60 s only; a capped sync can run longer than that."""
         mock_s3 = _setup_s3_mock(mock_boto_client)
@@ -303,8 +269,7 @@ class TestUpload:
             (output / "data.txt").write_text("content")
 
             with s3.mirror(cache_root=tmpdir, show_progress=False):
-                s3.upload("s3://bucket/output", local=output, interval=3600)
-                s3.request_upload()
+                s3.upload("s3://bucket/output", local=output, interval=1)
                 assert started.wait(5)
                 # The join returns as if its timeout had run out while the sync is still uploading.
                 s3._require_active_mirror()._sync_thread.join = lambda timeout=None: None

@@ -264,7 +264,6 @@ class _UploadRegistration:
     exclude: list[str] | None
     profile: Profile | None = None
     last_sync: float = 0.0
-    sync_requested: bool = False
     # The user's original URL, preserving trailing-slash intent. _sync_uploads
     # parses it raw so `s3://bucket/data/` skips head_object('data') in
     # _list_s3_objects and scans the directory as the user meant. NOT
@@ -503,14 +502,6 @@ class _Mirror:
 
         return local_path
 
-    def request_upload(self) -> None:
-        """Mark every upload registration due, so the background worker syncs it within a second."""
-        with self._lock:
-            for registration in self._uploads.values():
-                registration.sync_requested = True
-            if self._uploads:
-                self._ensure_background_thread_unlocked()
-
     def plan_download(
         self,
         remote: str,
@@ -718,11 +709,7 @@ class _Mirror:
             due: list[_UploadRegistration] = []
             with self._lock:
                 for registration in self._uploads.values():
-                    interval_due = (
-                        registration.interval is not None and now - registration.last_sync >= registration.interval
-                    )
-                    if registration.sync_requested or interval_due:
-                        registration.sync_requested = False
+                    if registration.interval is not None and now - registration.last_sync >= registration.interval:
                         registration.last_sync = now
                         due.append(registration)
 
@@ -1206,18 +1193,6 @@ def sync(
     return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile)
 
 
-def request_upload() -> None:
-    """
-    Start a sync of every registered upload in the background within a second, and return at once.
-
-    A sync that is already running finishes first, and the requested one follows it. The sync resets
-    each registration's interval timer, so ``interval`` becomes a backstop for a caller that requests
-    uploads at its own moments.
-    """
-    mirror_obj = _require_active_mirror()
-    mirror_obj.request_upload()
-
-
 def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
     """
     Lists files/objects in a directory or S3 prefix.
@@ -1274,7 +1249,6 @@ __all__ = [
     "download",
     "upload",
     "sync",
-    "request_upload",
     "ls",
     "plan_download",
     "plan_upload",

@@ -7,8 +7,6 @@
   uploads in the context. The limit covers every file worker, every multipart part and every
   profile together, so `max_workers` and boto3's per-transfer concurrency do not multiply it.
   `None` (the default) uploads at full speed. Downloads are not limited.
-- `pos3.request_upload()`: starts a background sync of every registered upload within a second
-  and returns at once. A caller can sync at its own moments and keep `interval` as a backstop.
 
 ### Fixed
 - The final sync on context exit waits for a background sync that is still running. Before, the

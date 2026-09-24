@@ -106,19 +106,6 @@ Bi-directional helper. Performs `download()` then registers `upload()`. Useful f
 
 **Returns**: `pathlib.Path` to the local directory/file.
 
-### `pos3.request_upload()`
-
-Starts a sync of every registered upload in the background within a second, and returns at once. A sync that is already running finishes first. Each sync resets the registration's `interval` timer, so a caller that uploads at its own moments can set a long `interval` as a backstop:
-
-```python
-@pos3.with_mirror(max_upload_bytes_per_second=2_000_000)
-def record():
-    out = pos3.upload('s3://bucket/episodes', interval=1800)
-    for episode in episodes():
-        write(episode, out)
-        pos3.request_upload()  # upload between episodes, not on a timer
-```
-
 ### `pos3.ls(prefix, recursive=False)`
 
 Lists files/objects in a directory or S3 prefix.
