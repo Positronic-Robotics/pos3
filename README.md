@@ -62,6 +62,7 @@ Context manager (or decorator) that activates the sync environment.
 - `cache_root` (default: `'~/.cache/positronic/s3/'`): Base directory for caching downloaded files.
 - `show_progress` (default: `True`): Display tqdm progress bars.
 - `max_workers` (default: `10`): Threads for parallel S3 operations.
+- `max_upload_bytes_per_second` (default: `None`): The total rate of all uploads in the context, in bytes per second. One limit covers every file worker, every multipart part and every profile, so `max_workers` does not multiply it. `None` uploads at full speed. Downloads are not limited.
 
 **Decorator Example:**
 
@@ -104,6 +105,19 @@ Bi-directional helper. Performs `download()` then registers `upload()`. Useful f
 - `delete_remote`: Cleanup remote files during upload. carefully consider setting to `False` when resuming jobs to avoid deleting history.
 
 **Returns**: `pathlib.Path` to the local directory/file.
+
+### `pos3.request_upload()`
+
+Starts a sync of every registered upload in the background within a second, and returns at once. A sync that is already running finishes first. Each sync resets the registration's `interval` timer, so a caller that uploads at its own moments can set a long `interval` as a backstop:
+
+```python
+@pos3.with_mirror(max_upload_bytes_per_second=2_000_000)
+def record():
+    out = pos3.upload('s3://bucket/episodes', interval=1800)
+    for episode in episodes():
+        write(episode, out)
+        pos3.request_upload()  # upload between episodes, not on a timer
+```
 
 ### `pos3.ls(prefix, recursive=False)`
 

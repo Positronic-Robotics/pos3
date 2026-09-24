@@ -6,7 +6,7 @@ import logging
 import shutil
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -27,6 +27,7 @@ from .profiles import (
     _url_profile,
     register_profile,
 )
+from .rate_limit import ByteRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,7 @@ class _Options:
     show_progress: bool = True
     max_workers: int = 10
     default_profile: Profile | None = None
+    max_upload_bytes_per_second: float | None = None
 
     def cache_path_for(self, remote: str, profile: Profile | None = None) -> Path:
         bucket, key = _parse_s3_url(remote)
@@ -262,6 +264,8 @@ class _UploadRegistration:
     exclude: list[str] | None
     profile: Profile | None = None
     last_sync: float = 0.0
+    # Set by request_upload(); the background worker syncs the registration at its next tick.
+    requested: bool = False
     # The user's original URL, preserving trailing-slash intent. _sync_uploads
     # parses it raw so `s3://bucket/data/` skips head_object('data') in
     # _list_s3_objects and scans the directory as the user meant. NOT
@@ -302,6 +306,13 @@ class _Mirror:
         self._downloads: dict[tuple[str, Profile | None], _DownloadRegistration] = {}
         self._uploads: dict[tuple[str, Profile | None], _UploadRegistration] = {}
         self._lock = threading.RLock()
+        # Held for a whole upload sync, so the final sync waits for a background sync that is still running.
+        self._sync_lock = threading.Lock()
+        self._upload_limiter = (
+            ByteRateLimiter(options.max_upload_bytes_per_second)
+            if options.max_upload_bytes_per_second is not None
+            else None
+        )
 
         self._stop_event: threading.Event | None = None
         self._sync_thread: threading.Thread | None = None
@@ -492,6 +503,14 @@ class _Mirror:
                 self._ensure_background_thread_unlocked()
 
         return local_path
+
+    def request_upload(self) -> None:
+        """Mark every upload registration due, so the background worker syncs it within a second."""
+        with self._lock:
+            for registration in self._uploads.values():
+                registration.requested = True
+            if self._uploads:
+                self._ensure_background_thread_unlocked()
 
     def plan_download(
         self,
@@ -700,12 +719,17 @@ class _Mirror:
             due: list[_UploadRegistration] = []
             with self._lock:
                 for registration in self._uploads.values():
-                    if registration.interval is not None and now - registration.last_sync >= registration.interval:
+                    interval_due = (
+                        registration.interval is not None and now - registration.last_sync >= registration.interval
+                    )
+                    if registration.requested or interval_due:
+                        registration.requested = False
                         registration.last_sync = now
                         due.append(registration)
 
             try:
-                self._sync_uploads(due)
+                with self._sync_lock:
+                    self._sync_uploads(due)
             except Exception as exc:
                 # Background interval syncs are best-effort: a TransferError
                 # (or anything else) here must not kill the daemon thread —
@@ -732,7 +756,8 @@ class _Mirror:
             # propagates so one-shot callers see definitive failures.
             uploads = [u for u in uploads if u.sync_on_error]
             try:
-                self._sync_uploads(uploads)
+                with self._sync_lock:
+                    self._sync_uploads(uploads)
             except Exception as exc:
                 logger.error(
                     "Cleanup sync after error failed; original exception preserved: %s: %s",
@@ -740,7 +765,8 @@ class _Mirror:
                     exc,
                 )
         else:
-            self._sync_uploads(uploads)
+            with self._sync_lock:
+                self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
         tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []
@@ -958,10 +984,23 @@ class _Mirror:
                 client.put_object(Bucket=bucket, Key=key, Body=b"")
             else:
                 file_path = local_path / info.relative_path if info.relative_path else local_path
-                client.upload_file(str(file_path), bucket, key, Callback=pbar.update)
+                client.upload_file(str(file_path), bucket, key, Callback=self._upload_callback(pbar))
         except Exception as exc:
             logger.error("Failed to put %s to %s/%s: %s", local_path, bucket, key, exc)
             raise
+
+    def _upload_callback(self, pbar) -> Callable[[int], None]:
+        limiter = self._upload_limiter
+        if limiter is None:
+            return pbar.update
+
+        # s3transfer calls this in the thread that sends the part, after each read of the file and
+        # before the bytes go out, so a block here holds back that part's send.
+        def paced(n_bytes: int) -> None:
+            limiter.consume(n_bytes)
+            pbar.update(n_bytes)
+
+        return paced
 
     def _remove_from_s3(self, bucket: str, key: str, profile: Profile | None = None) -> None:
         try:
@@ -1003,6 +1042,7 @@ def mirror(
     show_progress: bool = True,
     max_workers: int = 10,
     default_profile: str | Profile | None = None,
+    max_upload_bytes_per_second: float | None = None,
 ):
     """
     Context manager that activates the sync environment.
@@ -1012,6 +1052,8 @@ def mirror(
         show_progress: Display tqdm progress bars.
         max_workers: Threads for parallel S3 operations.
         default_profile: Default S3 profile for all operations in this context.
+        max_upload_bytes_per_second: The total rate of every upload in this context, across all file
+            workers, multipart parts and profiles. None uploads at full speed. Downloads are not capped.
     """
     global _GLOBAL_ACTIVE_MIRROR
     resolved_default_profile = _resolve_profile(default_profile)
@@ -1020,6 +1062,7 @@ def mirror(
         show_progress=show_progress,
         max_workers=max_workers,
         default_profile=resolved_default_profile,
+        max_upload_bytes_per_second=max_upload_bytes_per_second,
     )
 
     with _GLOBAL_MIRROR_LOCK:
@@ -1051,6 +1094,7 @@ def with_mirror(
     show_progress: bool = True,
     max_workers: int = 10,
     default_profile: str | Profile | None = None,
+    max_upload_bytes_per_second: float | None = None,
 ):
     """
     Decorator equivalent of mirror() for wrapping functions.
@@ -1066,6 +1110,7 @@ def with_mirror(
                 show_progress=show_progress,
                 max_workers=max_workers,
                 default_profile=default_profile,
+                max_upload_bytes_per_second=max_upload_bytes_per_second,
             ):
                 return func(*args, **kwargs)
 
@@ -1162,6 +1207,18 @@ def sync(
     return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile)
 
 
+def request_upload() -> None:
+    """
+    Start a sync of every registered upload in the background within a second, and return at once.
+
+    A sync that is already running finishes first, and the requested one follows it. The sync resets
+    each registration's interval timer, so ``interval`` becomes a backstop for a caller that requests
+    uploads at its own moments.
+    """
+    mirror_obj = _require_active_mirror()
+    mirror_obj.request_upload()
+
+
 def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
     """
     Lists files/objects in a directory or S3 prefix.
@@ -1218,6 +1275,7 @@ __all__ = [
     "download",
     "upload",
     "sync",
+    "request_upload",
     "ls",
     "plan_download",
     "plan_upload",
