@@ -264,8 +264,7 @@ class _UploadRegistration:
     exclude: list[str] | None
     profile: Profile | None = None
     last_sync: float = 0.0
-    # Set by request_upload(); the background worker syncs the registration at its next tick.
-    requested: bool = False
+    sync_requested: bool = False
     # The user's original URL, preserving trailing-slash intent. _sync_uploads
     # parses it raw so `s3://bucket/data/` skips head_object('data') in
     # _list_s3_objects and scans the directory as the user meant. NOT
@@ -508,7 +507,7 @@ class _Mirror:
         """Mark every upload registration due, so the background worker syncs it within a second."""
         with self._lock:
             for registration in self._uploads.values():
-                registration.requested = True
+                registration.sync_requested = True
             if self._uploads:
                 self._ensure_background_thread_unlocked()
 
@@ -722,8 +721,8 @@ class _Mirror:
                     interval_due = (
                         registration.interval is not None and now - registration.last_sync >= registration.interval
                     )
-                    if registration.requested or interval_due:
-                        registration.requested = False
+                    if registration.sync_requested or interval_due:
+                        registration.sync_requested = False
                         registration.last_sync = now
                         due.append(registration)
 
