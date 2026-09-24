@@ -304,7 +304,7 @@ class _Mirror:
         self._downloads: dict[tuple[str, Profile | None], _DownloadRegistration] = {}
         self._uploads: dict[tuple[str, Profile | None], _UploadRegistration] = {}
         self._lock = threading.RLock()
-        # Held for a whole upload sync, so the final sync waits for a background sync that is still running.
+        # One upload sync at a time: the stop's 60 s join can return while a capped background sync still runs.
         self._sync_lock = threading.Lock()
         self._upload_limiter = (
             ByteRateLimiter(options.max_upload_bytes_per_second)
