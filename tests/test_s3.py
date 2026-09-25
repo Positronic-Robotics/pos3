@@ -331,6 +331,37 @@ class TestUpload:
         assert mock_s3.upload_file.call_count == 0
 
     @patch(BOTO3_PATCH_TARGET)
+    def test_error_exit_without_sync_on_error_does_not_wait_for_the_sync_lock(self, mock_boto_client):
+        _setup_s3_mock(mock_boto_client)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "data.txt").write_text("content")
+            locks: list[threading.Lock] = []
+
+            def body():
+                try:
+                    with s3.mirror(cache_root=tmpdir, show_progress=False):
+                        s3.upload("s3://bucket/output", local=output, interval=None, sync_on_error=False)
+                        lock = s3._ACTIVE_MIRROR.get()._sync_lock
+                        lock.acquire()
+                        locks.append(lock)
+                        raise RuntimeError("Test error")
+                except RuntimeError:
+                    pass
+
+            worker = threading.Thread(target=body, daemon=True)
+            worker.start()
+            worker.join(timeout=5)
+            try:
+                assert not worker.is_alive()
+            finally:
+                for lock in locks:
+                    lock.release()
+                worker.join(timeout=5)
+
+    @patch(BOTO3_PATCH_TARGET)
     def test_upload_sync_on_error_true(self, mock_boto_client):
         """Test that uploads with sync_on_error=True do sync when context exits with error."""
         mock_s3 = _setup_s3_mock(mock_boto_client)

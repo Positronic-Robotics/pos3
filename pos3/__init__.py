@@ -741,6 +741,8 @@ class _Mirror:
             # more harm." The clean-exit path (had_error=False) still
             # propagates so one-shot callers see definitive failures.
             uploads = [u for u in uploads if u.sync_on_error]
+            if not uploads:
+                return
             try:
                 with self._sync_lock:
                     self._sync_uploads(uploads)
