@@ -62,6 +62,7 @@ Context manager (or decorator) that activates the sync environment.
 - `cache_root` (default: `'~/.cache/positronic/s3/'`): Base directory for caching downloaded files.
 - `show_progress` (default: `True`): Display tqdm progress bars.
 - `max_workers` (default: `10`): Threads for parallel S3 operations.
+- `max_upload_bytes_per_second` (default: `None`): The total rate of all uploads in the context, in bytes per second. One limit covers every file worker, every multipart part and every profile, so `max_workers` does not multiply it. `None` uploads at full speed. Downloads are not limited.
 
 **Decorator Example:**
 

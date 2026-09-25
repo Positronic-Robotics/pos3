@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0] - 2026-09-24
+
+### Added
+- `max_upload_bytes_per_second` on `pos3.mirror()` and `pos3.with_mirror()`: one rate for all
+  uploads in the context. The limit covers every file worker, every multipart part and every
+  profile together, so `max_workers` and boto3's per-transfer concurrency do not multiply it.
+  `None` (the default) uploads at full speed. Downloads are not limited.
+
+### Fixed
+- The final sync on context exit waits for a background sync that is still running. Before, the
+  stop joined the worker for 60 s only, and a longer sync then ran beside the final one.
+
 ## [0.3.1] - 2026-05-21
 
 ### Added
