@@ -21,7 +21,7 @@ class ByteRateLimiter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
-        if bytes_per_second <= 0:
+        if not bytes_per_second > 0:  # NaN fails every comparison, so test for the rates that pass.
             raise ValueError(f"bytes_per_second must be positive, got {bytes_per_second}")
         self.bytes_per_second = bytes_per_second
         self._clock = clock

@@ -50,9 +50,17 @@ class TestByteRateLimiter:
 
         assert fake.sleeps == []
 
-    def test_a_rate_must_be_positive(self):
+    @pytest.mark.parametrize("rate", [0, float("nan")])
+    def test_a_rate_must_be_positive(self, rate):
         with pytest.raises(ValueError, match="positive"):
-            ByteRateLimiter(0)
+            ByteRateLimiter(rate)
+
+    def test_an_infinite_rate_never_waits(self):
+        fake = _FakeTime()
+        limiter = ByteRateLimiter(float("inf"), clock=fake.clock, sleep=fake.sleep)
+        limiter.consume(1000)
+        limiter.consume(1000)
+        assert fake.sleeps == [0.0, 0.0]
 
 
 class _S3Stub(BaseHTTPRequestHandler):
