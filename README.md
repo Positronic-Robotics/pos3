@@ -106,9 +106,18 @@ Bi-directional helper. Performs `download()` then registers `upload()`. Useful f
 - `delete_local`: Cleanup local files during download.
 - `delete_remote`: Cleanup remote files during upload. carefully consider setting to `False` when resuming jobs to avoid deleting history.
 - `overwrite`: Select local directory files for forced upload. The initial download still compares sizes. Existing same-size local files stay local and can replace remote bytes on upload. Use a fresh local root when the remote contents must be authoritative.
-- `upload_exclude`: Override exclusions for uploads only. `None` uses `exclude` for both directions. An empty list clears upload exclusions. The initial download always uses `exclude`.
+- `upload_exclude`: Override exclusions for uploads only. `None` uses `exclude` for both directions. An empty list clears upload exclusions. The initial download always uses `exclude`. With `delete_remote=True`, remote objects matched by `exclude` but not by `upload_exclude` are deleted unless a local file exists at that path. Use `delete_remote=False` to preserve remote objects when narrowing or clearing upload exclusions.
 
-Use `upload_exclude=[".unfinished"]` to download existing recording markers while withholding new open markers from periodic uploads. A later one-shot `upload` can include markers that remain after recording stops. This option changes no deletion setting.
+Use `upload_exclude=[".unfinished"]` with `delete_remote=False` to download existing recording markers while withholding new open markers from periodic uploads. After recording and the first mirror context have stopped, a one-shot `upload` in a new `mirror()` context can include markers that remain. Set `delete=False` on this upload to preserve remote objects absent locally.
+
+```python
+with pos3.mirror():
+    local = pos3.sync(remote, local, delete_remote=False, upload_exclude=[".unfinished"])
+    # Run and stop recording before leaving this context.
+
+with pos3.mirror():
+    pos3.upload(remote, local, interval=None, delete=False)
+```
 
 **Returns**: `pathlib.Path` to the local directory/file.
 

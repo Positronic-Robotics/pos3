@@ -493,7 +493,7 @@ class _Mirror:
             profile=effective_profile,
             last_sync=0,
             raw_remote=remote,
-            overwrite=overwrite,
+            overwrite=None if overwrite is None else list(overwrite),
         )
 
         with self._lock:

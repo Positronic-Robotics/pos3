@@ -7,6 +7,8 @@
   Exclusions take precedence. Downloads and deletion settings retain their existing behavior.
 - Optional `upload_exclude` on `sync` overrides upload exclusions without changing the initial download.
   `None` inherits `exclude`; an empty list clears upload exclusions.
+  With `delete_remote=True`, remote objects matched by `exclude` but not by `upload_exclude` are deleted unless a local file exists at that path.
+  Use `delete_remote=False` to preserve these objects. For a later upload of recording markers, close the first mirror and use a new mirror with `upload(..., interval=None, delete=False)`.
 
 ## [0.4.0] - 2026-09-24
 
