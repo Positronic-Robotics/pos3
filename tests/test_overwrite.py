@@ -92,7 +92,41 @@ def test_overwrite_selection_survives_registration_replay_and_respects_exclusion
             "s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["journal"], exclude=["journal"]
         )
         with pytest.raises(ValueError, match="different parameters"):
-            pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=[])
+            pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=[], exclude=["journal"])
         assert pos3.plan_upload("s3://bucket/run/", tmp_path, overwrite=["journal"], exclude=["journal"]).to_copy == []
     assert storage.uploads == []
     assert storage.objects["bucket", "run/journal"] == b"old"
+
+
+def test_sync_overwrite_keeps_size_only_download_and_uploads_selected_local_bytes(tmp_path, storage):
+    local = tmp_path / "journal"
+    local.write_bytes(b"local")
+    storage.objects["bucket", "run/journal"] = b"other"
+    with pos3.mirror(show_progress=False):
+        pos3.sync("s3://bucket/run/", tmp_path, interval=None, delete_remote=False, overwrite=["journal"])
+        assert local.read_bytes() == b"local"
+        assert storage.objects["bucket", "run/journal"] == b"other"
+    assert storage.objects["bucket", "run/journal"] == b"local"
+
+
+def test_directory_name_does_not_select_its_contents(tmp_path, storage):
+    directory = tmp_path / "state"
+    directory.mkdir()
+    (directory / "journal").write_bytes(b"new")
+    storage.objects["bucket", "run/state/journal"] = b"old"
+    storage.objects["bucket", "run/state/"] = b""
+    with pos3.mirror(show_progress=False):
+        assert pos3.plan_upload("s3://bucket/run/", tmp_path, overwrite=["state"]).to_copy == []
+        pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["state"])
+    assert storage.objects["bucket", "run/state/journal"] == b"old"
+
+
+def test_single_file_source_keeps_size_only_copying_with_overwrite_patterns(tmp_path, storage):
+    local = tmp_path / "journal"
+    local.write_bytes(b"new")
+    storage.objects["bucket", "journal"] = b"old"
+    with pos3.mirror(show_progress=False):
+        assert pos3.plan_upload("s3://bucket/journal", local, overwrite=["*", "journal"]).to_copy == []
+        pos3.upload("s3://bucket/journal", local, interval=None, delete=False, overwrite=["*", "journal"])
+    assert storage.uploads == []
+    assert storage.objects["bucket", "journal"] == b"old"

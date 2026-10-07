@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0] - 2026-10-06
+
+### Added
+- Optional `overwrite` file patterns on `upload`, `sync` and `plan_upload` copy selected directory files even when sizes match.
+  Exclusions take precedence. Downloads and deletion settings retain their existing behavior.
+
 ## [0.4.0] - 2026-09-24
 
 ### Added
