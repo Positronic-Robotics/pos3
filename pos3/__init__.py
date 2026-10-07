@@ -194,7 +194,11 @@ def _filter_fileinfo(fileinfo_iter: Iterator[FileInfo], exclude: list[str] | Non
 
 
 def _compute_sync_diff(
-    source: Iterator[FileInfo], target: Iterator[FileInfo], overwrite: list[str] | None = None
+    source: Iterator[FileInfo],
+    target: Iterator[FileInfo],
+    overwrite: list[str] | None = None,
+    *,
+    source_name: str = ".",
 ) -> tuple[list[FileInfo], list[FileInfo]]:
     source_map: dict[str, FileInfo] = {info.relative_path: info for info in source}
     target_map: dict[str, FileInfo] = {info.relative_path: info for info in target}
@@ -211,7 +215,7 @@ def _compute_sync_diff(
             to_copy.append(source_info)
         elif not source_info.is_dir and (
             source_info.size != target_info.size
-            or any(PurePosixPath(relative_path or ".").match(pattern) for pattern in overwrite or [])
+            or any(PurePosixPath(relative_path or source_name).match(pattern) for pattern in overwrite or [])
         ):
             to_copy.append(source_info)
 
@@ -600,6 +604,7 @@ class _Mirror:
             _filter_fileinfo(_scan_local(source), exclude),
             _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
             overwrite=overwrite,
+            source_name=source.name,
         )
         copies: list[tuple[str, str]] = []
         for info in to_copy:
@@ -812,6 +817,7 @@ class _Mirror:
                 _filter_fileinfo(_scan_local(local_path), exclude),
                 _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
                 overwrite=overwrite,
+                source_name=local_path.name,
             )
 
             for info in to_copy:
@@ -1187,7 +1193,7 @@ def upload(
         delete: If True (default), deletes S3 files NOT present locally.
         sync_on_error: If True, syncs even if the context exits with an exception.
         profile: S3 profile name or Profile config for custom endpoints.
-        overwrite: Relative-path patterns copied on every upload, even when sizes match.
+        overwrite: Relative-path or single-file basename patterns copied even when sizes match.
 
     Returns:
         Path to the local directory/file.
@@ -1214,7 +1220,7 @@ def sync(
     Args:
         delete_local: Cleanup local files during download.
         delete_remote: Cleanup remote files during upload.
-        overwrite: Relative-path patterns copied on every upload, even when sizes match.
+        overwrite: Relative-path or single-file basename patterns copied even when sizes match.
         upload_exclude: Upload-only exclusions. None inherits exclude; an empty list clears upload exclusions.
         profile: S3 profile name or Profile config for custom endpoints.
 

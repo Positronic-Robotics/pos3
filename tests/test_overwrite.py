@@ -147,7 +147,14 @@ def test_right_relative_patterns_select_and_copy_nested_same_size_files(tmp_path
 @pytest.mark.parametrize("method", ["upload", "sync"])
 @pytest.mark.parametrize(
     "patterns,selected",
-    [(None, False), ([], False), (["*"], True), (["journal"], True), (["remote-journal"], False), (["state/journal"], False)],
+    [
+        (None, False),
+        ([], False),
+        (["*"], True),
+        (["journal"], True),
+        (["remote-journal"], False),
+        (["state/journal"], False),
+    ],
 )
 def test_single_file_overwrite_matches_source_basename_and_retains_remote_objects(
     tmp_path, storage, method, patterns, selected
@@ -174,6 +181,7 @@ def test_single_file_overwrite_matches_source_basename_and_retains_remote_object
     with pos3.mirror(show_progress=False):
         readback = pos3.download(remote, local=tmp_path / "readback")
     assert readback.read_bytes() == (b"new" if selected else b"old")
+
 
 @pytest.mark.parametrize(
     "upload_exclude,expected", [(None, {"upload"}), ([], {"general", "upload"}), (["upload"], {"general"})]
