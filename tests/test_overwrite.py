@@ -192,3 +192,55 @@ def test_sync_can_download_baseline_markers_without_uploading_new_open_markers(t
     assert storage.objects["bucket", "run/baseline/.unfinished"] == b"unfinished"
     assert storage.objects["bucket", "run/foreign"] == b"retained"
     assert storage.deletes == []
+
+    storage.objects["bucket", "run/late-foreign"] = b"arrived after phase one"
+    assert not (tmp_path / "late-foreign").exists()
+    with pos3.mirror(show_progress=False):
+        pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False)
+    assert storage.objects["bucket", "run/new/.unfinished"] == b"unfinished"
+    assert storage.objects["bucket", "run/baseline/.unfinished"] == b"unfinished"
+    assert storage.objects["bucket", "run/foreign"] == b"retained"
+    assert storage.objects["bucket", "run/late-foreign"] == b"arrived after phase one"
+    assert storage.deletes == []
+
+
+@pytest.mark.parametrize("delete_remote", [False, True])
+@pytest.mark.parametrize("upload_exclude", [None, []])
+def test_sync_narrowed_upload_exclusions_obey_remote_deletion(tmp_path, storage, delete_remote, upload_exclude):
+    storage.objects["bucket", "run/general"] = b"excluded download"
+    storage.objects["bucket", "run/baseline"] = b"retained"
+    with pos3.mirror(show_progress=False):
+        pos3.sync(
+            "s3://bucket/run/",
+            tmp_path,
+            interval=None,
+            delete_remote=delete_remote,
+            exclude=["general"],
+            upload_exclude=upload_exclude,
+        )
+        assert not (tmp_path / "general").exists()
+        assert (tmp_path / "baseline").read_bytes() == b"retained"
+    if delete_remote and upload_exclude == []:
+        assert ("bucket", "run/general") not in storage.objects
+        assert storage.deletes == ["run/general"]
+    else:
+        assert storage.objects["bucket", "run/general"] == b"excluded download"
+        assert storage.deletes == []
+    assert storage.objects["bucket", "run/baseline"] == b"retained"
+    assert storage.uploads == []
+
+
+def test_registered_overwrite_selection_survives_caller_list_mutation(tmp_path, storage):
+    for name in ["journal", "other"]:
+        (tmp_path / name).write_bytes(b"new")
+        storage.objects["bucket", "run/" + name] = b"old"
+    patterns = ["journal"]
+    with pos3.mirror(show_progress=False):
+        pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=patterns)
+        patterns[:] = ["other"]
+        with pytest.raises(ValueError, match="different parameters"):
+            pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["other"])
+    assert storage.uploads == ["run/journal"]
+    assert storage.objects["bucket", "run/journal"] == b"new"
+    assert storage.objects["bucket", "run/other"] == b"old"
+    assert storage.deletes == []
