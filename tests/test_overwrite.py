@@ -24,8 +24,13 @@ def storage(monkeypatch):
             return self
 
         def paginate(self, *, Bucket, Prefix):
-            yield {"Contents": [{"Key": key, "Size": len(body)} for (bucket, key), body in self.objects.items()
-                                if bucket == Bucket and key.startswith(Prefix)]}
+            yield {
+                "Contents": [
+                    {"Key": key, "Size": len(body)}
+                    for (bucket, key), body in self.objects.items()
+                    if bucket == Bucket and key.startswith(Prefix)
+                ]
+            }
 
         def upload_file(self, filename, bucket, key, *, Callback):
             body = Path(filename).read_bytes()
@@ -80,8 +85,12 @@ def test_overwrite_selection_survives_registration_replay_and_respects_exclusion
     (tmp_path / "journal").write_bytes(b"new")
     storage.objects["bucket", "run/journal"] = b"old"
     with pos3.mirror(show_progress=False):
-        pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["journal"], exclude=["journal"])
-        pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["journal"], exclude=["journal"])
+        pos3.upload(
+            "s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["journal"], exclude=["journal"]
+        )
+        pos3.upload(
+            "s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=["journal"], exclude=["journal"]
+        )
         with pytest.raises(ValueError, match="different parameters"):
             pos3.upload("s3://bucket/run/", tmp_path, interval=None, delete=False, overwrite=[])
         assert pos3.plan_upload("s3://bucket/run/", tmp_path, overwrite=["journal"], exclude=["journal"]).to_copy == []

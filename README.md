@@ -87,7 +87,7 @@ Registers a path for download. Ensures local copy matches S3 immediately.
 
 **Returns**: `pathlib.Path` to the local directory/file.
 
-### `pos3.upload(remote, local=None, interval=300, delete=True, sync_on_error=False, exclude=None)`
+### `pos3.upload(remote, local=None, interval=300, delete=True, sync_on_error=False, exclude=None, profile=None, overwrite=None)`
 
 Registers a local path for upload. Uploads on exit and optionally in background.
 - `remote`: Destination S3 URL.
@@ -98,7 +98,9 @@ Registers a local path for upload. Uploads on exit and optionally in background.
 
 **Returns**: `pathlib.Path` to the local directory/file.
 
-### `pos3.sync(remote, local=None, interval=300, delete_local=True, delete_remote=True, sync_on_error=False, exclude=None)`
+Pass `overwrite=[".recording-attempts.sqlite", "run_metadata_*.yaml"]` to copy matching files even when the remote size matches. Patterns use the same relative-path matching as `exclude`. Excluded files remain excluded. The default compares file sizes. This option does not change deletion settings. `plan_upload(..., overwrite=...)` reports the same selection without transfers.
+
+### `pos3.sync(remote, local=None, interval=300, delete_local=True, delete_remote=True, sync_on_error=False, exclude=None, profile=None, overwrite=None)`
 
 Bi-directional helper. Performs `download()` then registers `upload()`. Useful for jobs that work on existing files, like when you resume training from a checkpoint.
 - `delete_local`: Cleanup local files during download.
