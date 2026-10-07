@@ -5,6 +5,8 @@
 ### Added
 - Optional `overwrite` file patterns on `upload`, `sync` and `plan_upload` copy selected directory files even when sizes match.
   Exclusions take precedence. Downloads and deletion settings retain their existing behavior.
+- Optional `upload_exclude` on `sync` overrides upload exclusions without changing the initial download.
+  `None` inherits `exclude`; an empty list clears upload exclusions.
 
 ## [0.4.0] - 2026-09-24
 

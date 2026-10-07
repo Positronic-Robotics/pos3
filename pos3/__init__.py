@@ -627,6 +627,7 @@ class _Mirror:
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
         overwrite: list[str] | None = None,
+        upload_exclude: list[str] | None = None,
     ) -> Path:
         # Let download() and upload() handle profile resolution and normalization
         local_path = self.download(remote, local, delete_local, exclude, profile)
@@ -637,7 +638,16 @@ class _Mirror:
         effective_profile = self._effective_profile(profile, remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop((normalized, effective_profile), None)
-        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile, overwrite)
+        return self.upload(
+            remote,
+            local_path,
+            interval,
+            delete_remote,
+            sync_on_error,
+            exclude if upload_exclude is None else upload_exclude,
+            profile,
+            overwrite,
+        )
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
@@ -1196,6 +1206,7 @@ def sync(
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
     overwrite: list[str] | None = None,
+    upload_exclude: list[str] | None = None,
 ) -> Path:
     """
     Bi-directional helper. Performs download() then registers upload().
@@ -1204,6 +1215,7 @@ def sync(
         delete_local: Cleanup local files during download.
         delete_remote: Cleanup remote files during upload.
         overwrite: Relative-path patterns copied on every upload, even when sizes match.
+        upload_exclude: Upload-only exclusions. None inherits exclude; an empty list clears upload exclusions.
         profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
@@ -1211,7 +1223,7 @@ def sync(
     """
     mirror_obj = _require_active_mirror()
     return mirror_obj.sync(
-        remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile, overwrite
+        remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile, overwrite, upload_exclude
     )
 
 

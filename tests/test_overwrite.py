@@ -121,6 +121,29 @@ def test_directory_name_does_not_select_its_contents(tmp_path, storage):
     assert storage.objects["bucket", "run/state/journal"] == b"old"
 
 
+@pytest.mark.parametrize("method", ["upload", "sync"])
+@pytest.mark.parametrize("patterns", [["journal"], ["state/journal"]])
+def test_right_relative_patterns_select_and_copy_nested_same_size_files(tmp_path, storage, method, patterns):
+    directory = tmp_path / "state"
+    directory.mkdir()
+    for name in ["journal", "other"]:
+        (directory / name).write_bytes(b"new")
+        storage.objects["bucket", "run/state/" + name] = b"old"
+    storage.objects["bucket", "run/state/remote-only"] = b"keep"
+    with pos3.mirror(show_progress=False):
+        plan = pos3.plan_upload("s3://bucket/run/", tmp_path, overwrite=patterns)
+        assert plan.to_copy == [(str(directory / "journal"), "s3://bucket/run/state/journal")]
+        kwargs = {"delete": False} if method == "upload" else {"delete_remote": False}
+        getattr(pos3, method)("s3://bucket/run/", tmp_path, interval=None, overwrite=patterns, **kwargs)
+        assert (directory / "journal").read_bytes() == b"new"
+        assert storage.objects["bucket", "run/state/journal"] == b"old"
+    assert storage.uploads == ["run/state/journal"]
+    assert storage.objects["bucket", "run/state/journal"] == b"new"
+    assert storage.objects["bucket", "run/state/other"] == b"old"
+    assert storage.objects["bucket", "run/state/remote-only"] == b"keep"
+    assert storage.deletes == []
+
+
 def test_single_file_source_keeps_size_only_copying_with_overwrite_patterns(tmp_path, storage):
     local = tmp_path / "journal"
     local.write_bytes(b"new")
@@ -130,3 +153,42 @@ def test_single_file_source_keeps_size_only_copying_with_overwrite_patterns(tmp_
         pos3.upload("s3://bucket/journal", local, interval=None, delete=False, overwrite=["*", "journal"])
     assert storage.uploads == []
     assert storage.objects["bucket", "journal"] == b"old"
+
+
+@pytest.mark.parametrize(
+    "upload_exclude,expected", [(None, {"upload"}), ([], {"general", "upload"}), (["upload"], {"general"})]
+)
+def test_sync_upload_exclusions_keep_the_download_exclusions(tmp_path, storage, upload_exclude, expected):
+    storage.objects["bucket", "run/general"] = b"excluded download"
+    storage.objects["bucket", "run/baseline"] = b"retained"
+    with pos3.mirror(show_progress=False):
+        pos3.sync(
+            "s3://bucket/run/",
+            tmp_path,
+            interval=None,
+            delete_remote=False,
+            exclude=["general"],
+            upload_exclude=upload_exclude,
+        )
+        assert not (tmp_path / "general").exists()
+        assert (tmp_path / "baseline").read_bytes() == b"retained"
+        (tmp_path / "general").write_bytes(b"new")
+        (tmp_path / "upload").write_bytes(b"new")
+    assert set(storage.uploads) == {"run/" + name for name in expected}
+    assert storage.deletes == []
+
+
+def test_sync_can_download_baseline_markers_without_uploading_new_open_markers(tmp_path, storage):
+    storage.objects["bucket", "run/baseline/.unfinished"] = b"unfinished"
+    storage.objects["bucket", "run/foreign"] = b"retained"
+    with pos3.mirror(show_progress=False):
+        pos3.sync("s3://bucket/run/", tmp_path, interval=None, delete_remote=False, upload_exclude=[".unfinished"])
+        assert (tmp_path / "baseline/.unfinished").read_bytes() == b"unfinished"
+        (tmp_path / "new").mkdir()
+        (tmp_path / "new/.unfinished").write_bytes(b"unfinished")
+        (tmp_path / "new/data").write_bytes(b"recording")
+    assert ("bucket", "run/new/.unfinished") not in storage.objects
+    assert storage.objects["bucket", "run/new/data"] == b"recording"
+    assert storage.objects["bucket", "run/baseline/.unfinished"] == b"unfinished"
+    assert storage.objects["bucket", "run/foreign"] == b"retained"
+    assert storage.deletes == []

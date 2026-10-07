@@ -100,12 +100,15 @@ Registers a local path for upload. Uploads on exit and optionally in background.
 
 Pass `overwrite=[".recording-attempts.sqlite", "run_metadata_*.yaml"]` to copy matching files even when the remote size matches. This selection applies to file paths relative to a directory source. Patterns use `PurePosixPath.match`, which matches from the right. A directory name does not select its contents. A single-file source has no relative file path, so overwrite patterns cannot select it. Excluded files remain excluded. The default compares file sizes. This option does not change deletion settings. `plan_upload(..., overwrite=...)` reports the same selection without transfers.
 
-### `pos3.sync(remote, local=None, interval=300, delete_local=True, delete_remote=True, sync_on_error=False, exclude=None, profile=None, overwrite=None)`
+### `pos3.sync(remote, local=None, interval=300, delete_local=True, delete_remote=True, sync_on_error=False, exclude=None, profile=None, overwrite=None, upload_exclude=None)`
 
 Bi-directional helper. Performs `download()` then registers `upload()`. Useful for jobs that work on existing files, like when you resume training from a checkpoint.
 - `delete_local`: Cleanup local files during download.
 - `delete_remote`: Cleanup remote files during upload. carefully consider setting to `False` when resuming jobs to avoid deleting history.
 - `overwrite`: Select local directory files for forced upload. The initial download still compares sizes. Existing same-size local files stay local and can replace remote bytes on upload. Use a fresh local root when the remote contents must be authoritative.
+- `upload_exclude`: Override exclusions for uploads only. `None` uses `exclude` for both directions. An empty list clears upload exclusions. The initial download always uses `exclude`.
+
+Use `upload_exclude=[".unfinished"]` to download existing recording markers while withholding new open markers from periodic uploads. A later one-shot `upload` can include markers that remain after recording stops. This option changes no deletion setting.
 
 **Returns**: `pathlib.Path` to the local directory/file.
 
