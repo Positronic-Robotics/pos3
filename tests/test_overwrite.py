@@ -144,16 +144,36 @@ def test_right_relative_patterns_select_and_copy_nested_same_size_files(tmp_path
     assert storage.deletes == []
 
 
-def test_single_file_source_keeps_size_only_copying_with_overwrite_patterns(tmp_path, storage):
+@pytest.mark.parametrize("method", ["upload", "sync"])
+@pytest.mark.parametrize(
+    "patterns,selected",
+    [(None, False), ([], False), (["*"], True), (["journal"], True), (["remote-journal"], False), (["state/journal"], False)],
+)
+def test_single_file_overwrite_matches_source_basename_and_retains_remote_objects(
+    tmp_path, storage, method, patterns, selected
+):
     local = tmp_path / "journal"
     local.write_bytes(b"new")
-    storage.objects["bucket", "journal"] = b"old"
+    remote = "s3://bucket/run/remote-journal"
+    storage.objects["bucket", "run/remote-journal"] = b"old"
+    storage.objects["bucket", "run/remote-only"] = b"keep"
     with pos3.mirror(show_progress=False):
-        assert pos3.plan_upload("s3://bucket/journal", local, overwrite=["*", "journal"]).to_copy == []
-        pos3.upload("s3://bucket/journal", local, interval=None, delete=False, overwrite=["*", "journal"])
-    assert storage.uploads == []
-    assert storage.objects["bucket", "journal"] == b"old"
-
+        plan = pos3.plan_upload(remote, local, overwrite=patterns)
+        assert plan.to_copy == ([(str(local), remote)] if selected else [])
+        assert plan.to_delete == []
+        assert storage.uploads == []
+        assert storage.deletes == []
+        kwargs = {"delete": False} if method == "upload" else {"delete_remote": False}
+        getattr(pos3, method)(remote, local, interval=None, overwrite=patterns, **kwargs)
+        assert local.read_bytes() == b"new"
+        assert storage.objects["bucket", "run/remote-journal"] == b"old"
+    assert storage.uploads == (["run/remote-journal"] if selected else [])
+    assert storage.deletes == []
+    assert storage.objects["bucket", "run/remote-journal"] == (b"new" if selected else b"old")
+    assert storage.objects["bucket", "run/remote-only"] == b"keep"
+    with pos3.mirror(show_progress=False):
+        readback = pos3.download(remote, local=tmp_path / "readback")
+    assert readback.read_bytes() == (b"new" if selected else b"old")
 
 @pytest.mark.parametrize(
     "upload_exclude,expected", [(None, {"upload"}), ([], {"general", "upload"}), (["upload"], {"general"})]
