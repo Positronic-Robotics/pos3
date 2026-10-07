@@ -159,7 +159,6 @@ def test_single_file_overwrite_matches_source_basename_and_retains_remote_object
     storage.objects["bucket", "run/remote-only"] = b"keep"
     with pos3.mirror(show_progress=False):
         plan = pos3.plan_upload(remote, local, overwrite=patterns)
-        assert plan.to_copy == ([(str(local), remote)] if selected else [])
         assert plan.to_delete == []
         assert storage.uploads == []
         assert storage.deletes == []
@@ -167,9 +166,10 @@ def test_single_file_overwrite_matches_source_basename_and_retains_remote_object
         getattr(pos3, method)(remote, local, interval=None, overwrite=patterns, **kwargs)
         assert local.read_bytes() == b"new"
         assert storage.objects["bucket", "run/remote-journal"] == b"old"
+    assert storage.objects["bucket", "run/remote-journal"] == (b"new" if selected else b"old")
+    assert plan.to_copy == ([(str(local), remote)] if selected else [])
     assert storage.uploads == (["run/remote-journal"] if selected else [])
     assert storage.deletes == []
-    assert storage.objects["bucket", "run/remote-journal"] == (b"new" if selected else b"old")
     assert storage.objects["bucket", "run/remote-only"] == b"keep"
     with pos3.mirror(show_progress=False):
         readback = pos3.download(remote, local=tmp_path / "readback")
