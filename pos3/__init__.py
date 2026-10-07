@@ -193,7 +193,13 @@ def _filter_fileinfo(fileinfo_iter: Iterator[FileInfo], exclude: list[str] | Non
             yield info
 
 
-def _compute_sync_diff(source: Iterator[FileInfo], target: Iterator[FileInfo]) -> tuple[list[FileInfo], list[FileInfo]]:
+def _compute_sync_diff(
+    source: Iterator[FileInfo],
+    target: Iterator[FileInfo],
+    overwrite: list[str] | None = None,
+    *,
+    source_name: str = ".",
+) -> tuple[list[FileInfo], list[FileInfo]]:
     source_map: dict[str, FileInfo] = {info.relative_path: info for info in source}
     target_map: dict[str, FileInfo] = {info.relative_path: info for info in target}
 
@@ -207,7 +213,10 @@ def _compute_sync_diff(source: Iterator[FileInfo], target: Iterator[FileInfo]) -
         elif source_info.is_dir != target_info.is_dir:
             to_delete.append(target_info)
             to_copy.append(source_info)
-        elif not source_info.is_dir and source_info.size != target_info.size:
+        elif not source_info.is_dir and (
+            source_info.size != target_info.size
+            or any(PurePosixPath(relative_path or source_name).match(pattern) for pattern in overwrite or [])
+        ):
             to_copy.append(source_info)
 
     for relative_path, target_info in target_map.items():
@@ -263,6 +272,7 @@ class _UploadRegistration:
     sync_on_error: bool
     exclude: list[str] | None
     profile: Profile | None = None
+    overwrite: list[str] | None = None
     last_sync: float = 0.0
     # The user's original URL, preserving trailing-slash intent. _sync_uploads
     # parses it raw so `s3://bucket/data/` skips head_object('data') in
@@ -281,6 +291,7 @@ class _UploadRegistration:
             and self.sync_on_error == other.sync_on_error
             and self.exclude == other.exclude
             and self.profile == other.profile
+            and self.overwrite == other.overwrite
         )
 
 
@@ -440,6 +451,7 @@ class _Mirror:
         sync_on_error,
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
+        overwrite: list[str] | None = None,
     ) -> Path:
         """
         Register (and perform if needed) an upload from a local directory or file to a remote S3 bucket path.
@@ -485,6 +497,7 @@ class _Mirror:
             profile=effective_profile,
             last_sync=0,
             raw_remote=remote,
+            overwrite=None if overwrite is None else list(overwrite),
         )
 
         with self._lock:
@@ -557,6 +570,7 @@ class _Mirror:
         local: str | Path | None = None,
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
+        overwrite: list[str] | None = None,
     ) -> TransferPlan:
         """Compute the :class:`TransferPlan` ``upload()`` would execute.
 
@@ -589,6 +603,8 @@ class _Mirror:
         to_copy, to_delete = _compute_sync_diff(
             _filter_fileinfo(_scan_local(source), exclude),
             _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, effective_profile), exclude),
+            overwrite=overwrite,
+            source_name=source.name,
         )
         copies: list[tuple[str, str]] = []
         for info in to_copy:
@@ -615,6 +631,8 @@ class _Mirror:
         sync_on_error: bool,
         exclude: list[str] | None = None,
         profile: str | Profile | None = None,
+        overwrite: list[str] | None = None,
+        upload_exclude: list[str] | None = None,
     ) -> Path:
         # Let download() and upload() handle profile resolution and normalization
         local_path = self.download(remote, local, delete_local, exclude, profile)
@@ -625,7 +643,16 @@ class _Mirror:
         effective_profile = self._effective_profile(profile, remote)
         # Unregister the download to allow upload registration for the same remote
         self._downloads.pop((normalized, effective_profile), None)
-        return self.upload(remote, local_path, interval, delete_remote, sync_on_error, exclude, profile)
+        return self.upload(
+            remote,
+            local_path,
+            interval,
+            delete_remote,
+            sync_on_error,
+            exclude if upload_exclude is None else upload_exclude,
+            profile,
+            overwrite,
+        )
 
     def ls(self, prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
         """Lists objects under the given prefix, working for both local directories and S3 prefixes."""
@@ -757,7 +784,7 @@ class _Mirror:
                 self._sync_uploads(uploads)
 
     def _sync_uploads(self, registrations: Iterable[_UploadRegistration]) -> None:
-        tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None]] = []
+        tasks: list[tuple[str, Path, bool, list[str] | None, Profile | None, list[str] | None]] = []
         for registration in registrations:
             if registration.local_path.exists():
                 tasks.append(
@@ -771,6 +798,7 @@ class _Mirror:
                         registration.delete,
                         registration.exclude,
                         registration.profile,
+                        registration.overwrite,
                     )
                 )
 
@@ -781,13 +809,15 @@ class _Mirror:
         to_remove: list[tuple[str, str, Profile | None]] = []
         total_bytes = 0
 
-        for remote, local_path, delete, exclude, profile in tasks:
+        for remote, local_path, delete, exclude, profile, overwrite in tasks:
             logger.debug("Syncing upload: %s from %s (delete=%s)", remote, local_path, delete)
             scan_bucket, scan_prefix = _parse_s3_url(remote)
             bucket, out_prefix = _parse_s3_url(_normalize_s3_url(remote))
             to_copy, to_delete = _compute_sync_diff(
                 _filter_fileinfo(_scan_local(local_path), exclude),
                 _filter_fileinfo(self._scan_s3(scan_bucket, scan_prefix, profile), exclude),
+                overwrite=overwrite,
+                source_name=local_path.name,
             )
 
             for info in to_copy:
@@ -1151,6 +1181,7 @@ def upload(
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
+    overwrite: list[str] | None = None,
 ) -> Path:
     """
     Register a local path for upload. Uploads on exit and optionally in background.
@@ -1162,12 +1193,13 @@ def upload(
         delete: If True (default), deletes S3 files NOT present locally.
         sync_on_error: If True, syncs even if the context exits with an exception.
         profile: S3 profile name or Profile config for custom endpoints.
+        overwrite: Relative-path or single-file basename patterns copied even when sizes match.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude, profile)
+    return mirror_obj.upload(remote, local, interval, delete, sync_on_error, exclude, profile, overwrite)
 
 
 def sync(
@@ -1179,6 +1211,8 @@ def sync(
     sync_on_error: bool = False,
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
+    overwrite: list[str] | None = None,
+    upload_exclude: list[str] | None = None,
 ) -> Path:
     """
     Bi-directional helper. Performs download() then registers upload().
@@ -1186,13 +1220,17 @@ def sync(
     Args:
         delete_local: Cleanup local files during download.
         delete_remote: Cleanup remote files during upload.
+        overwrite: Relative-path or single-file basename patterns copied even when sizes match.
+        upload_exclude: Upload-only exclusions. None inherits exclude; an empty list clears upload exclusions.
         profile: S3 profile name or Profile config for custom endpoints.
 
     Returns:
         Path to the local directory/file.
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.sync(remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile)
+    return mirror_obj.sync(
+        remote, local, interval, delete_local, delete_remote, sync_on_error, exclude, profile, overwrite, upload_exclude
+    )
 
 
 def ls(prefix: str, recursive: bool = False, profile: str | Profile | None = None) -> list[str]:
@@ -1232,6 +1270,7 @@ def plan_upload(
     local: str | Path | None = None,
     exclude: list[str] | None = None,
     profile: str | Profile | None = None,
+    overwrite: list[str] | None = None,
 ) -> TransferPlan:
     """Return the :class:`TransferPlan` ``upload()`` would execute.
 
@@ -1242,7 +1281,7 @@ def plan_upload(
     skips registrations with a missing local_path).
     """
     mirror_obj = _require_active_mirror()
-    return mirror_obj.plan_upload(remote, local, exclude, profile)
+    return mirror_obj.plan_upload(remote, local, exclude, profile, overwrite)
 
 
 __all__ = [
